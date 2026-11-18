@@ -1,0 +1,52 @@
+name: Release binaries
+
+# release-please creates the GitHub release and its v* tag with an App token, so
+# this runs on that tag and attaches the binaries the codespace image downloads:
+#   captain-utils_<version>_linux_<arch>.tar.gz and checksums.txt
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            out="captain-utils_${VERSION}_linux_${arch}"
+            mkdir -p "build/$out"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+              -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT_SHA}" \
+              -o "build/$out/captain-utils" .
+            cp LICENSE README.md "build/$out/"
+            tar -C build -czf "dist/$out.tar.gz" "$out"
+          done
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+          cat dist/checksums.txt
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" dist/* --clobber
