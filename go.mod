@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/huh v1.0.0
-	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/charmbracelet/lipgloss/v2 v2.0.6
 	github.com/databus23/helm-diff/v3 v3.15.15
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d
