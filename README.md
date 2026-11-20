@@ -17,7 +17,7 @@ menu calls it for each area that has been ported.
 | 0 | CLI skeleton, captain repo reader, CI, release binaries | done |
 | 1 | `versions diff` (show_diff_table), `aws eks-addons / nodepools / kubernetes` (replaces `script_captain_utils`) | done |
 | 2 | `platform`, `argocd`, `aws calico upgrade`, `pods watch` (Helm SDK, helm-diff's own diff rendering) | done |
-| 3 | `crds` (platform-crds bundle, server-side apply) | next |
+| 3 | `crds` (platform-crds bundle: `check`, `apply`; server-side apply) | done |
 | 4 | the interactive menu, installed as `captain_utils` | |
 
 ## Usage
@@ -44,6 +44,25 @@ captain-utils argocd upgrade --crd-version v3.2.12   # legacy CRD install (capta
 captain-utils aws calico upgrade
 captain-utils pods watch                    # unhealthy pods, every 5s; --once, --all
 ```
+
+```sh
+captain-utils crds check                    # read-only; exit 0 in sync, 1 drift, 2 failure
+captain-utils crds check --version v0.1.6
+captain-utils crds apply                    # the VERSIONS/glueops.yaml pin (dev: a chooser): diff, confirm, apply
+captain-utils crds apply --version v0.1.6 --yes
+captain-utils crds apply --chart-dir ~/platform-crds   # "custom": a checkout rendered by hack/render.sh
+```
+
+`crds` reads `./platform.yaml` to pick the CRD profiles this cluster installs
+(production requires it; dev without one installs every profile). Run it before
+and after the `argocd` step. CRDs are only ever server-side applied
+(force-conflicts, field manager `glueops-platform-crds`), never replaced:
+replace erases `metadata.finalizers` and orphans the custom resources of a
+terminating CRD. `apply` always applies after a yes, also when nothing differs,
+so field ownership lands on the manager; a CRD that is being deleted is waited
+out first (`--wait-timeout`, default 120s), and a stored API version the bundle
+no longer defines stops the run before the diff is shown. `--chart` (env
+`CRDS_CHART`) overrides the bundle chart reference.
 
 `diff` prints the same text `helm diff upgrade --allow-unreleased` prints
 (helm-diff's own packages render it) and changes nothing. `upgrade` pages the
@@ -99,6 +118,39 @@ lines to stderr.
   refuses a kustomization that uses anything but `resources`.
 - `aws calico upgrade` asks before deleting the `aws-node` daemonset.
 - An empty diff says so instead of opening an empty pager.
+
+## Changes from the bash `crds` command (phase 3)
+
+- Subcommands and flags instead of positional arguments: `crds check [version]`
+  is `crds check [--version V]`, `check-dir DIR` / `apply-dir DIR` are
+  `--chart-dir DIR`. `CRDS_AUTO_CONFIRM=yes` still works, as does `--yes`;
+  `CRDS_CHART` and `CRDS_WAIT_TIMEOUT` still work, as `--chart` / `--wait-timeout`.
+- No helm, kubectl, yq, jq or gum: the Helm SDK renders the bundle (`helm
+  template --include-crds -f platform.yaml`, `helm show crds` for the "83 of 85"
+  count), client-go lists, patches and waits.
+- `kubectl diff` is replaced by a server-side dry-run apply of each CRD compared
+  with the live one (managedFields left out). The text is a unified diff headed
+  `diff -u -N LIVE/... MERGED/...` rather than kubectl's temp-directory paths.
+- The `kubectl apply` echo and its 3-line tail are replaced by one line saying
+  how many CRDs are applied. Like kubectl, a failing CRD does not stop the others;
+  every failure is reported together.
+- `check` with no version reads the pin and never opens the dev chooser, as before.
+- The menu's `target-version` is not a subcommand: `apply` resolves the version itself.
+- `check` reports **drift** (exit 1) while a bundle CRD is being deleted. A terminating CRD still
+  has its spec, so its diff is clean and the bash `check` called it "in sync" (exit 0) even though
+  `apply` refuses to, and the type is about to disappear.
+- On a cluster that has none of the bundle's CRDs, `check` says `87 not yet owned ... (87 not on
+  the cluster yet)`, where the bash command said "all 87 owned".
+- Before it applies, `apply` hands client-side-apply ownership over to the field manager (what
+  `kubectl apply --server-side` does), so the `last-applied-configuration` annotation and the
+  `kubectl-client-side-apply` manager are dropped from CRDs an older installer created. Checked
+  against the bash command on a k3d captain: same end state.
+- Ctrl-C or SIGTERM exits 130 with `interrupted`, after the in-flight call is cancelled (the bash
+  command trapped the signal and cleaned its work dir; there is none now). Esc backs out of a
+  prompt, as it did in gum, in every command.
+- A group with no subcommand of that name (`crds apply-dir`, `platform bogus`) now exits 1 with
+  `unknown command`. It used to print the group's help and exit 0, so a script calling a name
+  that no longer exists did nothing and looked successful.
 
 ## Development
 

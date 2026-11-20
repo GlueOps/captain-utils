@@ -20,6 +20,9 @@ the phase table.
   `upgrade --install`.
 - `internal/upgrade`: the platform / argocd / calico flows, behind interfaces (`Helm`, `Kube`,
   `Releases`) so tests script them; tests are named after the bash scenarios they replace.
+- `internal/crds`: the platform-crds bundle flows (`Apply`, `Check`) behind `Source`, `Cluster` and
+  `Releases` interfaces. `doApply` is the only mutating Apply and needs a `clearance` from `clear`;
+  a test enforces that and that nothing replaces/updates a CRD.
 - `internal/gitinfo` (go-git), `internal/github` (release tags over REST).
 
 ## Rules

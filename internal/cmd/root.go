@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/glueops/captain-utils/internal/captain"
+	"github.com/glueops/captain-utils/internal/crds"
 	"github.com/glueops/captain-utils/internal/github"
 	"github.com/glueops/captain-utils/internal/helmx"
 	"github.com/glueops/captain-utils/internal/kube"
@@ -53,6 +54,7 @@ func (e *ExitError) Unwrap() error { return e.Err }
 type Cluster interface {
 	versions.Cluster
 	upgrade.Kube
+	crds.Cluster
 	Pods(ctx context.Context, now time.Time) ([]kube.PodRow, error)
 }
 
@@ -63,6 +65,7 @@ type App struct {
 	NewCluster      func(kubeContext string) (Cluster, error)
 	NewHelm         func(kubeContext string) upgrade.Helm
 	NewGitHub       func() upgrade.Releases
+	NewCRDSource    func(kubeContext string) crds.Source
 	Prompt          ui.Prompter
 
 	v *viper.Viper
@@ -106,6 +109,7 @@ func NewApp(version, commit string, out, errw io.Writer) *App {
 	}
 	a.NewHelm = func(kubeContext string) upgrade.Helm { return helmx.New(kubeContext, errw) }
 	a.NewGitHub = func() upgrade.Releases { return github.New() }
+	a.NewCRDSource = func(kubeContext string) crds.Source { return helmx.New(kubeContext, errw) }
 	a.Prompt = ui.NewTTY()
 	return a
 }
@@ -154,7 +158,8 @@ itself moves here last.`,
 	a.v.SetDefault("platform-chart-dir-prefill", "/workspaces/")
 	_ = a.v.BindEnv("platform-chart-dir-prefill", "PLATFORM_CHART_DIR_PREFILL")
 
-	root.AddCommand(a.versionCmd(), a.versionsCmd(), a.awsCmd(), a.platformCmd(), a.argocdCmd(), a.podsCmd())
+	root.AddCommand(a.versionCmd(), a.versionsCmd(), a.awsCmd(), a.platformCmd(), a.argocdCmd(), a.crdsCmd(), a.podsCmd())
+	rejectUnknownSubcommands(root)
 	return root
 }
 
@@ -177,6 +182,10 @@ func (a *App) Execute(ctx context.Context, args []string) int {
 	err := root.ExecuteContext(ctx)
 	if err == nil {
 		return 0
+	}
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		a.printer().Warn("interrupted")
+		return 130
 	}
 	var ee *ExitError
 	if errors.As(err, &ee) {
@@ -204,4 +213,23 @@ func Main(version, commit string) int {
 	// API server warnings once each, as "Warning: ..." (as kubectl and helm print them), not as klog lines
 	rest.SetDefaultWarningHandler(rest.NewWarningWriter(os.Stderr, rest.WarningWriterOptions{Deduplicate: true}))
 	return NewApp(version, commit, os.Stdout, os.Stderr).Execute(ctx, os.Args[1:])
+}
+
+// rejectUnknownSubcommands makes a group command (one that only has subcommands)
+// fail on an argument that is not one of them. Cobra returns a group's help and
+// exit 0 before it ever validates arguments, so a script calling a subcommand that
+// no longer exists (the bash crds command's apply-dir, say) would silently do
+// nothing. A group on its own still prints its help.
+func rejectUnknownSubcommands(c *cobra.Command) {
+	for _, sub := range c.Commands() {
+		if sub.HasSubCommands() && sub.Run == nil && sub.RunE == nil {
+			sub.RunE = func(cmd *cobra.Command, args []string) error {
+				if len(args) > 0 {
+					return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+				}
+				return cmd.Help()
+			}
+		}
+		rejectUnknownSubcommands(sub)
+	}
 }
