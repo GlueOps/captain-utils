@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/glueops/captain-utils/internal/captain"
+	"github.com/glueops/captain-utils/internal/crds"
 	"github.com/glueops/captain-utils/internal/github"
 	"github.com/glueops/captain-utils/internal/helmx"
 	"github.com/glueops/captain-utils/internal/kube"
@@ -53,6 +54,7 @@ func (e *ExitError) Unwrap() error { return e.Err }
 type Cluster interface {
 	versions.Cluster
 	upgrade.Kube
+	crds.Cluster
 	Pods(ctx context.Context, now time.Time) ([]kube.PodRow, error)
 }
 
@@ -63,6 +65,7 @@ type App struct {
 	NewCluster      func(kubeContext string) (Cluster, error)
 	NewHelm         func(kubeContext string) upgrade.Helm
 	NewGitHub       func() upgrade.Releases
+	NewCRDSource    func(kubeContext string) crds.Source
 	Prompt          ui.Prompter
 
 	v *viper.Viper
@@ -106,6 +109,7 @@ func NewApp(version, commit string, out, errw io.Writer) *App {
 	}
 	a.NewHelm = func(kubeContext string) upgrade.Helm { return helmx.New(kubeContext, errw) }
 	a.NewGitHub = func() upgrade.Releases { return github.New() }
+	a.NewCRDSource = func(kubeContext string) crds.Source { return helmx.New(kubeContext, errw) }
 	a.Prompt = ui.NewTTY()
 	return a
 }
@@ -154,7 +158,7 @@ itself moves here last.`,
 	a.v.SetDefault("platform-chart-dir-prefill", "/workspaces/")
 	_ = a.v.BindEnv("platform-chart-dir-prefill", "PLATFORM_CHART_DIR_PREFILL")
 
-	root.AddCommand(a.versionCmd(), a.versionsCmd(), a.awsCmd(), a.platformCmd(), a.argocdCmd(), a.podsCmd())
+	root.AddCommand(a.versionCmd(), a.versionsCmd(), a.awsCmd(), a.platformCmd(), a.argocdCmd(), a.crdsCmd(), a.podsCmd())
 	return root
 }
 

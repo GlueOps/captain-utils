@@ -36,6 +36,13 @@ func (fakeCluster) DeleteDaemonSet(context.Context, string, string) (bool, error
 func (fakeCluster) Apply(_ context.Context, o *unstructured.Unstructured, _ kube.ApplyOptions) (*unstructured.Unstructured, error) {
 	return o, nil
 }
+func (fakeCluster) ListCRDs(context.Context) ([]*unstructured.Unstructured, error) { return nil, nil }
+func (fakeCluster) RemoveCRDAnnotation(context.Context, string, string) error      { return nil }
+func (fakeCluster) RemoveCRDLabel(context.Context, string, string) error           { return nil }
+func (fakeCluster) WaitCRDsDeleted(context.Context, []string, time.Duration) error { return nil }
+func (fakeCluster) WaitCRDsEstablished(context.Context, []string, time.Duration) error {
+	return nil
+}
 func (fakeCluster) Pods(context.Context, time.Time) ([]kube.PodRow, error) {
 	return []kube.PodRow{
 		{Namespace: "glueops-core", Name: "ok", Ready: "1/1", Status: "Running", Age: "1d"},
