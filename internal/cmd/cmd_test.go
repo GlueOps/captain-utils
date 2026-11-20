@@ -38,6 +38,7 @@ func (fakeCluster) Apply(_ context.Context, o *unstructured.Unstructured, _ kube
 }
 func (fakeCluster) ListCRDs(context.Context) ([]*unstructured.Unstructured, error) { return nil, nil }
 func (fakeCluster) RemoveCRDAnnotation(context.Context, string, string) error      { return nil }
+func (fakeCluster) MigrateCRDToSSA(context.Context, string, string) (bool, error)  { return false, nil }
 func (fakeCluster) RemoveCRDLabel(context.Context, string, string) error           { return nil }
 func (fakeCluster) WaitCRDsDeleted(context.Context, []string, time.Duration) error { return nil }
 func (fakeCluster) WaitCRDsEstablished(context.Context, []string, time.Duration) error {

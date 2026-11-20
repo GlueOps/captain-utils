@@ -76,3 +76,37 @@ func TestCRDsApplyWithoutTerminalNeedsYes(t *testing.T) {
 		t.Fatalf("%d %q", code, errs)
 	}
 }
+
+func TestInterruptedRunExitsWith130(t *testing.T) {
+	dir := captainDir(t)
+	mustWrite(t, dir+"/platform.yaml", "a: 1\n")
+	var out, errb bytes.Buffer
+	a := NewApp("v0.0.0-test", "abc", &out, &errb)
+	a.NewCluster = func(string) (Cluster, error) { return fakeCluster{}, nil }
+	a.NewCRDSource = func(string) crds.Source { return cancelledSource{} }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := a.Execute(ctx, []string{"--captain-dir", dir, "crds", "check", "--version", "v0.1.6"}); code != 130 || !strings.Contains(errb.String(), "interrupted") {
+		t.Fatalf("%d %q", code, errb.String())
+	}
+}
+
+type cancelledSource struct{}
+
+func (cancelledSource) CRDBundle(ctx context.Context, _, _, _ string) (*helmx.CRDBundle, error) {
+	return nil, ctx.Err()
+}
+
+func TestUnknownSubcommandOfAGroupFailsInsteadOfPrintingHelp(t *testing.T) {
+	// regression: `crds apply-dir DIR` (the bash command's name) exited 0 and did nothing
+	for _, args := range [][]string{{"crds", "apply-dir", "x"}, {"platform", "bogus"}, {"aws", "calico", "bogus"}} {
+		code, _, errs := run(t, fakeCluster{}, nil, args...)
+		if code == 0 || !strings.Contains(errs, "unknown command") {
+			t.Fatalf("%v: %d %q", args, code, errs)
+		}
+	}
+	// the group on its own still prints help
+	if code, out, _ := run(t, fakeCluster{}, nil, "crds"); code != 0 || !strings.Contains(out, "Available Commands") {
+		t.Fatalf("%d %q", code, out)
+	}
+}

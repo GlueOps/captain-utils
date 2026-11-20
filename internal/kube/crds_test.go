@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -70,5 +71,43 @@ func TestWaitCRDsDeleted(t *testing.T) {
 	}
 	if err := c.WaitCRDsDeleted(context.Background(), []string{"a.x.io"}, 50*time.Millisecond); err == nil || !strings.Contains(err.Error(), "a.x.io") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestMigrateCRDToSSAHandsClientSideApplyOwnershipToOurManager(t *testing.T) {
+	obj := crdObj("a.x.io", true, map[string]interface{}{lastApplied: "{}"})
+	obj.SetManagedFields([]metav1.ManagedFieldsEntry{{
+		Manager: "kubectl-client-side-apply", Operation: metav1.ManagedFieldsOperationUpdate, APIVersion: "apiextensions.k8s.io/v1",
+		FieldsType: "FieldsV1",
+		FieldsV1:   &metav1.FieldsV1{Raw: []byte(`{"f:metadata":{"f:annotations":{"f:kubectl.kubernetes.io/last-applied-configuration":{}}}}`)},
+	}})
+	c := crdClient(obj)
+	migrated, err := c.MigrateCRDToSSA(context.Background(), "a.x.io", "glueops-platform-crds")
+	if err != nil || !migrated {
+		t.Fatalf("migrated=%v err=%v", migrated, err)
+	}
+	got, _ := c.ListCRDs(context.Background())
+	mf := got[0].GetManagedFields()
+	if len(mf) != 1 || mf[0].Manager != "glueops-platform-crds" || mf[0].Operation != metav1.ManagedFieldsOperationApply {
+		t.Fatalf("%+v", mf)
+	}
+	// nothing left to migrate: a second call is a no-op
+	if migrated, err := c.MigrateCRDToSSA(context.Background(), "a.x.io", "glueops-platform-crds"); err != nil || migrated {
+		t.Fatalf("second call: migrated=%v err=%v", migrated, err)
+	}
+}
+
+func TestMigrateCRDToSSALeavesACRDThatClientSideApplyNeverTouched(t *testing.T) {
+	c := crdClient(crdObj("a.x.io", true, nil))
+	if migrated, err := c.MigrateCRDToSSA(context.Background(), "a.x.io", "glueops-platform-crds"); err != nil || migrated {
+		t.Fatalf("migrated=%v err=%v", migrated, err)
+	}
+}
+
+func TestMigrateCRDToSSAOfACRDThatIsNotInstalledYetIsNotAnError(t *testing.T) {
+	// regression: a fresh cluster has none of the bundle's CRDs, and apply migrates each one first
+	c := crdClient()
+	if migrated, err := c.MigrateCRDToSSA(context.Background(), "absent.x.io", "glueops-platform-crds"); err != nil || migrated {
+		t.Fatalf("migrated=%v err=%v", migrated, err)
 	}
 }

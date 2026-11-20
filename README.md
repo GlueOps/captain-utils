@@ -136,6 +136,21 @@ lines to stderr.
   every failure is reported together.
 - `check` with no version reads the pin and never opens the dev chooser, as before.
 - The menu's `target-version` is not a subcommand: `apply` resolves the version itself.
+- `check` reports **drift** (exit 1) while a bundle CRD is being deleted. A terminating CRD still
+  has its spec, so its diff is clean and the bash `check` called it "in sync" (exit 0) even though
+  `apply` refuses to, and the type is about to disappear.
+- On a cluster that has none of the bundle's CRDs, `check` says `87 not yet owned ... (87 not on
+  the cluster yet)`, where the bash command said "all 87 owned".
+- Before it applies, `apply` hands client-side-apply ownership over to the field manager (what
+  `kubectl apply --server-side` does), so the `last-applied-configuration` annotation and the
+  `kubectl-client-side-apply` manager are dropped from CRDs an older installer created. Checked
+  against the bash command on a k3d captain: same end state.
+- Ctrl-C or SIGTERM exits 130 with `interrupted`, after the in-flight call is cancelled (the bash
+  command trapped the signal and cleaned its work dir; there is none now). Esc backs out of a
+  prompt, as it did in gum, in every command.
+- A group with no subcommand of that name (`crds apply-dir`, `platform bogus`) now exits 1 with
+  `unknown command`. It used to print the group's help and exit 0, so a script calling a name
+  that no longer exists did nothing and looked successful.
 
 ## Development
 

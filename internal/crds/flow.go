@@ -29,6 +29,7 @@ type Cluster interface {
 	Apply(ctx context.Context, obj *unstructured.Unstructured, o kube.ApplyOptions) (*unstructured.Unstructured, error)
 	RemoveCRDAnnotation(ctx context.Context, name, key string) error
 	RemoveCRDLabel(ctx context.Context, name, key string) error
+	MigrateCRDToSSA(ctx context.Context, name, manager string) (bool, error)
 	WaitCRDsDeleted(ctx context.Context, names []string, timeout time.Duration) error
 	WaitCRDsEstablished(ctx context.Context, names []string, timeout time.Duration) error
 }
@@ -187,7 +188,7 @@ func (d *Deps) plan(version string, b *bundle, live []*unstructured.Unstructured
 	// An observation, not a promise: the documented crds -> argocd -> crds order means
 	// the argocd release is itself what creates a terminating CRD.
 	if len(dying) > 0 {
-		fmt.Fprintf(d.Out, "  wait:   %d terminating, the apply waits up to %s: %s\n", len(dying), d.wait(), join(dying))
+		fmt.Fprintf(d.Out, "  wait:   %d terminating, the apply waits up to %s: %s\n", len(dying), secs(d.wait()), join(dying))
 	} else {
 		fmt.Fprintln(d.Out, "  wait:   none terminating right now — re-checked after you confirm, a wait may still follow")
 	}
@@ -228,8 +229,12 @@ func (d *Deps) clear(ctx context.Context, live []*unstructured.Unstructured) (cl
 	if dying := terminating(live); len(dying) > 0 {
 		d.P.Info("Waiting for terminating CRD(s) to disappear: %s", join(dying))
 		if err := d.Cluster.WaitCRDsDeleted(ctx, sortedCopy(dying), d.wait()); err != nil {
-			d.P.Plain("   a custom resource with a finalizer is holding the type open; clear them, then re-run")
-			return clearance{}, fmt.Errorf("still terminating after %s — the bundle was NOT applied: %s: %w", d.wait(), join(dying), err)
+			var to *kube.TimeoutError
+			if errors.As(err, &to) {
+				d.P.Plain("   a custom resource with a finalizer is holding the type open; clear them, then re-run")
+				return clearance{}, fmt.Errorf("still terminating after %s — the bundle was NOT applied: %s", secs(d.wait()), join(to.Pending))
+			}
+			return clearance{}, fmt.Errorf("waiting for terminating CRDs — the bundle was NOT applied: %w", err)
 		}
 	}
 	return clearance{ok: true, live: live}, nil
@@ -244,6 +249,12 @@ func (d *Deps) doApply(ctx context.Context, b *bundle, c clearance) error {
 	d.P.Note("+ server-side apply of %d CRDs (force-conflicts, field manager %s)", b.total(), FieldManager)
 	var errs []error
 	for _, obj := range b.objs {
+		// what kubectl apply --server-side does first: hand client-side-apply ownership (and with
+		// it the last-applied annotation) over to our manager, so the apply below can drop them
+		if _, err := d.Cluster.MigrateCRDToSSA(ctx, obj.GetName(), FieldManager); err != nil {
+			errs = append(errs, err)
+			continue
+		}
 		if _, err := d.Cluster.Apply(ctx, obj, kube.ApplyOptions{FieldManager: FieldManager, Force: true}); err != nil {
 			errs = append(errs, fmt.Errorf("apply %s: %w", obj.GetName(), err))
 		}
@@ -520,6 +531,12 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 	} else {
 		fmt.Fprintf(d.Out, "  own:    all %d owned by %s\n", b.total(), FieldManager)
 	}
+	// A CRD that is being deleted still has its spec, so it diffs as identical, but it is not
+	// in sync: the type is about to disappear. apply refuses to call that state in sync too.
+	if dying := terminating(live); len(dying) > 0 {
+		d.P.Warn("drift: %d CRD(s) are terminating and will disappear: %s", len(dying), join(dying))
+		return ErrDrift
+	}
 	if df.drift() {
 		d.P.Warn("drift: this cluster does not match platform-crds %s", v)
 		return ErrDrift
@@ -527,3 +544,6 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 	d.P.Info("✅ in sync with platform-crds %s", v)
 	return nil
 }
+
+// secs prints a duration the way the bash command did: 120s, not 2m0s.
+func secs(d time.Duration) string { return fmt.Sprintf("%ds", int(d.Round(time.Second).Seconds())) }

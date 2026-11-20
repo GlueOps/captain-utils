@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
@@ -52,7 +53,10 @@ func (t *TTY) run(f huh.Field) error {
 	if !t.Interactive() {
 		return ErrNoTerminal
 	}
-	return huh.NewForm(huh.NewGroup(f)).WithInput(t.In).WithOutput(t.Out).WithShowHelp(false).Run()
+	// gum choose/confirm/input backed out on Esc as well as Ctrl-C; huh's default is Ctrl-C only
+	km := huh.NewDefaultKeyMap()
+	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"))
+	return huh.NewForm(huh.NewGroup(f)).WithKeyMap(km).WithInput(t.In).WithOutput(t.Out).WithShowHelp(false).Run()
 }
 
 // Choose shows a selection list.

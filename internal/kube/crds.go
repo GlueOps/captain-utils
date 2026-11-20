@@ -13,7 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/csaupgrade"
+	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 )
 
 var crdGVR = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
@@ -92,11 +95,21 @@ func (c *Client) pollCRDs(ctx context.Context, names []string, timeout time.Dura
 	})
 	if err != nil {
 		if ctx.Err() == nil && wait.Interrupted(err) {
-			return fmt.Errorf("timed out after %s: %s", timeout, strings.Join(pending, " "))
+			return &TimeoutError{Timeout: timeout, Pending: pending}
 		}
 		return err
 	}
 	return nil
+}
+
+// TimeoutError is a wait that ran out of time; Pending are the CRDs it was still waiting for.
+type TimeoutError struct {
+	Timeout time.Duration
+	Pending []string
+}
+
+func (e *TimeoutError) Error() string {
+	return fmt.Sprintf("timed out after %s: %s", e.Timeout, strings.Join(e.Pending, " "))
 }
 
 // WaitCRDsDeleted waits until none of the CRDs exist (kubectl wait --for=delete).
@@ -128,4 +141,48 @@ func (c *Client) WaitCRDsEstablished(ctx context.Context, names []string, timeou
 		}
 		return false, nil
 	})
+}
+
+// lastApplied is the annotation client-side apply keeps its own record in.
+const lastApplied = "kubectl.kubernetes.io/last-applied-configuration"
+
+var lastAppliedPath = fieldpath.NewSet(fieldpath.MakePathOrDie("metadata", "annotations", lastApplied))
+
+// MigrateCRDToSSA is the step `kubectl apply --server-side` takes before it
+// applies: a CRD that was managed by client-side apply (an Update owner of the
+// last-applied annotation, normally kubectl-client-side-apply) has that
+// ownership handed to manager as an Apply owner. The server-side apply that
+// follows then drops the annotation and the old manager, because manager no
+// longer sets them. It reports whether anything was migrated.
+func (c *Client) MigrateCRDToSSA(ctx context.Context, name, manager string) (bool, error) {
+	ri, err := c.crds()
+	if err != nil {
+		return false, err
+	}
+	for range 5 { // conflicts on resourceVersion: re-read and retry, as kubectl does
+		obj, err := ri.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return false, nil // not installed yet (a fresh cluster): nothing to migrate
+		}
+		if err != nil {
+			return false, fmt.Errorf("get crd %s: %w", name, err)
+		}
+		managers := sets.New[string]()
+		for _, e := range csaupgrade.FindFieldsOwners(obj.GetManagedFields(), metav1.ManagedFieldsOperationUpdate, lastAppliedPath) {
+			managers.Insert(e.Manager)
+		}
+		patch, err := csaupgrade.UpgradeManagedFieldsPatch(obj, managers, manager)
+		if err != nil {
+			return false, fmt.Errorf("migrate crd %s to server-side apply: %w", name, err)
+		}
+		if patch == nil {
+			return false, nil
+		}
+		if _, err = ri.Patch(ctx, name, types.JSONPatchType, patch, metav1.PatchOptions{}); err == nil {
+			return true, nil
+		} else if !apierrors.IsConflict(err) {
+			return false, fmt.Errorf("migrate crd %s to server-side apply: %w", name, err)
+		}
+	}
+	return false, fmt.Errorf("migrate crd %s to server-side apply: too many conflicts", name)
 }

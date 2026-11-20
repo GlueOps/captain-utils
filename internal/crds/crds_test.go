@@ -53,7 +53,12 @@ func (f *fakeSource) CRDBundle(_ context.Context, ref, version, values string) (
 type fakeCluster struct {
 	live   map[string]*unstructured.Unstructured
 	calls  []string
+	order  []string // migrate and apply, in order
 	delErr error
+	// failures to inject
+	applyFail  map[string]error
+	estErr     error
+	afterApply func(f *fakeCluster, name string)
 	// afterList runs after each ListCRDs (to change the cluster between reads)
 	afterList func(f *fakeCluster, n int)
 	lists     int
@@ -114,9 +119,16 @@ func (f *fakeCluster) Apply(_ context.Context, obj *unstructured.Unstructured, o
 	if o.DryRun {
 		return m, nil
 	}
+	if err := f.applyFail[obj.GetName()]; err != nil {
+		return nil, err
+	}
 	f.calls = append(f.calls, "apply "+obj.GetName())
+	f.order = append(f.order, "apply "+obj.GetName())
 	m.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: FieldManager, Operation: "Apply"}})
 	f.live[obj.GetName()] = m
+	if f.afterApply != nil {
+		f.afterApply(f, obj.GetName())
+	}
 	return m, nil
 }
 
@@ -134,6 +146,10 @@ func (f *fakeCluster) RemoveCRDLabel(_ context.Context, n, k string) error {
 	f.live[n].SetLabels(l)
 	return nil
 }
+func (f *fakeCluster) MigrateCRDToSSA(_ context.Context, n, m string) (bool, error) {
+	f.order = append(f.order, "migrate "+n)
+	return false, nil
+}
 func (f *fakeCluster) WaitCRDsDeleted(_ context.Context, names []string, _ time.Duration) error {
 	f.calls = append(f.calls, "wait deleted "+strings.Join(names, ","))
 	if f.delErr != nil {
@@ -146,7 +162,7 @@ func (f *fakeCluster) WaitCRDsDeleted(_ context.Context, names []string, _ time.
 }
 func (f *fakeCluster) WaitCRDsEstablished(_ context.Context, names []string, _ time.Duration) error {
 	f.calls = append(f.calls, "wait established "+strings.Join(names, ","))
-	return nil
+	return f.estErr
 }
 
 // drifted makes the live CRD differ from the bundle's.
@@ -319,8 +335,9 @@ func TestApplyTerminatingStillStuckAppliesNothing(t *testing.T) {
 	h.syncLive()
 	now := metav1.NewTime(time.Now())
 	h.cl.live["b.x.io"].SetDeletionTimestamp(&now)
-	h.cl.delErr = errors.New("timed out")
-	if err := Apply(context.Background(), h.d, Options{}); err == nil || !strings.Contains(err.Error(), "bundle was NOT applied") {
+	h.cl.delErr = &kube.TimeoutError{Timeout: time.Second, Pending: []string{"b.x.io"}}
+	err := Apply(context.Background(), h.d, Options{})
+	if err == nil || err.Error() != "still terminating after 1s — the bundle was NOT applied: b.x.io" {
 		t.Fatalf("%v", err)
 	}
 	for _, c := range h.cl.calls {
@@ -619,5 +636,87 @@ func TestDoApplyRefusesWithoutClearance(t *testing.T) {
 	}
 	if err := h.d.doApply(context.Background(), b, clearance{}); err == nil || len(h.cl.calls) != 0 {
 		t.Fatalf("%v %v", err, h.cl.calls)
+	}
+}
+
+func TestApplyMigratesClientSideApplyOwnershipBeforeEachApply(t *testing.T) {
+	// kubectl apply --server-side does this first; without it the last-applied annotation
+	// and the kubectl-client-side-apply manager stay on the CRD for good
+	h := newHarness(t, "production", nil, true, "yes")
+	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "migrate a.x.io|apply a.x.io|migrate b.x.io|apply b.x.io"
+	if got := strings.Join(h.cl.order, "|"); got != want {
+		t.Fatalf("got %s want %s", got, want)
+	}
+}
+
+func TestCheckTerminatingCRDIsDriftNotInSync(t *testing.T) {
+	// the diff of a CRD that is being deleted is clean, which is exactly why a clean diff cannot be the verdict
+	h := newHarness(t, "production", nil, false)
+	h.syncLive()
+	now := metav1.NewTime(time.Now())
+	h.cl.live["b.x.io"].SetDeletionTimestamp(&now)
+	err := Check(context.Background(), h.d, Options{})
+	if !errors.Is(err, ErrDrift) || len(h.cl.mutations()) != 0 || !strings.Contains(h.errs.String(), "drift: 1 CRD(s) are terminating and will disappear: b.x.io") || strings.Contains(h.errs.String(), "in sync") {
+		t.Fatalf("%v %v %q", err, h.cl.calls, h.errs)
+	}
+}
+
+func TestWaitIsPrintedInSecondsLikeTheBashCommand(t *testing.T) {
+	if got := secs(2 * time.Minute); got != "120s" {
+		t.Fatal(got)
+	}
+}
+
+func TestApplyKeepsGoingAfterOneCRDFailsAndReportsEveryFailure(t *testing.T) {
+	// as kubectl apply does: a bad CRD does not stop the others, and no failure is hidden
+	h := newHarness(t, "production", nil, true, "yes")
+	h.src.manifest = crdDoc("a.x.io") + crdDoc("b.x.io") + crdDoc("c.x.io")
+	h.cl.applyFail = map[string]error{"a.x.io": errors.New("webhook denied"), "c.x.io": errors.New("quota")}
+	err := Apply(context.Background(), h.d, Options{})
+	if err == nil || !strings.Contains(err.Error(), "apply a.x.io: webhook denied") || !strings.Contains(err.Error(), "apply c.x.io: quota") {
+		t.Fatalf("%v", err)
+	}
+	if got := strings.Join(h.cl.calls, "|"); got != "apply b.x.io" {
+		t.Fatalf("b must still be applied, and nothing may be waited on after a failure: %s", got)
+	}
+}
+
+func TestApplyFailsWhenCRDsDoNotBecomeEstablished(t *testing.T) {
+	h := newHarness(t, "production", nil, true, "yes")
+	h.cl.estErr = &kube.TimeoutError{Timeout: time.Second, Pending: []string{"b.x.io"}}
+	err := Apply(context.Background(), h.d, Options{})
+	if err == nil || !strings.Contains(err.Error(), "some CRDs did not become Established") || !strings.Contains(err.Error(), "b.x.io") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestApplyAssertsEveryBundleCRDIsLiveAfterwards(t *testing.T) {
+	h := newHarness(t, "production", nil, true, "yes")
+	h.cl.afterApply = func(f *fakeCluster, name string) {
+		if name == "b.x.io" {
+			delete(f.live, name) // gone again before the post-apply read
+		}
+	}
+	err := Apply(context.Background(), h.d, Options{})
+	if err == nil || !strings.Contains(err.Error(), "expected 2 bundle CRDs live after apply, found 1") {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestApplyFailsWhenACRDStartsTerminatingDuringTheApply(t *testing.T) {
+	// Established stays True on a CRD being deleted, so only the post-apply read can see this
+	h := newHarness(t, "production", nil, true, "yes")
+	h.cl.afterApply = func(f *fakeCluster, name string) {
+		if name == "a.x.io" {
+			now := metav1.NewTime(time.Now())
+			f.live[name].SetDeletionTimestamp(&now)
+		}
+	}
+	err := Apply(context.Background(), h.d, Options{})
+	if err == nil || !strings.Contains(err.Error(), "the bundle WAS applied, but still terminating") || !strings.Contains(err.Error(), "a.x.io") {
+		t.Fatalf("%v", err)
 	}
 }
