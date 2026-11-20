@@ -545,7 +545,7 @@ func TestCheckFailsWithoutPinOrVersion(t *testing.T) {
 func TestCheckReportsCRDMissingFromClusterAsNew(t *testing.T) {
 	h := newHarness(t, "production", nil, false)
 	err := Check(context.Background(), h.d, Options{Version: "v0.1.6"})
-	if !errors.Is(err, ErrDrift) || !strings.Contains(h.out.String(), "2 new, 0 changed") {
+	if !errors.Is(err, ErrDrift) || !strings.Contains(h.out.String(), "2 new, 0 changed") || !strings.Contains(h.out.String(), "own:    2 not yet owned by glueops-platform-crds: (2 not on the cluster yet)") {
 		t.Fatalf("%v %q", err, h.out)
 	}
 }

@@ -509,8 +509,14 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 		return fmt.Errorf("diff failed: %w", err)
 	}
 	d.plan(v, b, live, df)
-	if un := unowned(live, FieldManager); len(un) > 0 {
-		fmt.Fprintf(d.Out, "  own:    %d not yet owned by %s: %s\n", len(un), FieldManager, join(un))
+	// a CRD that does not exist yet is not owned either
+	un, missing := unowned(live, FieldManager), b.total()-len(live)
+	if n := len(un) + missing; n > 0 {
+		detail := join(un)
+		if missing > 0 {
+			detail = strings.TrimSpace(fmt.Sprintf("%s (%d not on the cluster yet)", detail, missing))
+		}
+		fmt.Fprintf(d.Out, "  own:    %d not yet owned by %s: %s\n", n, FieldManager, detail)
 	} else {
 		fmt.Fprintf(d.Out, "  own:    all %d owned by %s\n", b.total(), FieldManager)
 	}
