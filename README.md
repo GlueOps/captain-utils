@@ -124,7 +124,7 @@ lines to stderr.
 - Subcommands and flags instead of positional arguments: `crds check [version]`
   is `crds check [--version V]`, `check-dir DIR` / `apply-dir DIR` are
   `--chart-dir DIR`. `CRDS_AUTO_CONFIRM=yes` still works, as does `--yes`;
-  `CRDS_CHART` and `CRDS_WAIT_TIMEOUT` still work, as `--chart` / `--wait-timeout`.
+  `CRDS_CHART` and `CRDS_WAIT_TIMEOUT` still work, as `--chart` / `--wait-timeout` (a bare number is seconds, as in bash; `90s` and `2m` work too).
 - No helm, kubectl, yq, jq or gum: the Helm SDK renders the bundle (`helm
   template --include-crds -f platform.yaml`, `helm show crds` for the "83 of 85"
   count), client-go lists, patches and waits.

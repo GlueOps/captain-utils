@@ -45,6 +45,17 @@ func argoTrackedLabel(live []*unstructured.Unstructured) []string {
 	return out
 }
 
+// csaManaged counts the CRDs that carry a client-side-apply record: apply migrates them.
+func csaManaged(live []*unstructured.Unstructured) int {
+	n := 0
+	for _, o := range live {
+		if _, ok := o.GetAnnotations()["kubectl.kubernetes.io/last-applied-configuration"]; ok {
+			n++
+		}
+	}
+	return n
+}
+
 // unowned names the CRDs no apply by manager has touched.
 func unowned(live []*unstructured.Unstructured, manager string) []string {
 	var out []string

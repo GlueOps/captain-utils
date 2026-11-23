@@ -78,14 +78,25 @@ func parseBundle(label string, cb *helmx.CRDBundle) (*bundle, error) {
 		return nil, fmt.Errorf("platform-crds %s: bundle does not parse as %d separate CRD documents (every crds/*.yaml must start with --- — run hack/render.sh): %w", label, kinds, err)
 	}
 	var other []string
+	seen := map[string]bool{}
+	var dups []string
 	b := &bundle{union: cb.Union}
 	for _, o := range objs {
 		if o.GetKind() != crdKind {
 			other = append(other, o.GetKind()+"/"+o.GetName())
 			continue
 		}
+		if seen[o.GetName()] {
+			dups = append(dups, o.GetName())
+			continue
+		}
+		seen[o.GetName()] = true
 		b.objs = append(b.objs, o)
 		b.names = append(b.names, o.GetName())
+	}
+	// the live counts (post-apply assertion, check's "not on the cluster yet") are by unique name
+	if len(dups) > 0 {
+		return nil, fmt.Errorf("platform-crds %s: bundle declares a CRD more than once, refusing to apply: %s", label, strings.Join(dups, " "))
 	}
 	if b.total() != kinds {
 		return nil, fmt.Errorf("platform-crds %s: bundle does not parse as %d separate CRD documents (every crds/*.yaml must start with --- — run hack/render.sh)", label, kinds)

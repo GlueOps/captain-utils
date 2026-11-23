@@ -393,6 +393,7 @@ func TestBundleRefusals(t *testing.T) {
 	for name, tc := range map[string]struct{ manifest, want string }{
 		"should refuse a bundle with no CRDs":                                         {"---\n", "rendered no CRDs"},
 		"should refuse non-CRD objects":                                               {crdDoc("a.x.io") + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n", "non-CRD objects, refusing to apply: ConfigMap/cm"},
+		"should refuse a CRD declared twice (live counts are by unique name)":         {crdDoc("a.x.io") + crdDoc("b.x.io") + crdDoc("a.x.io"), "declares a CRD more than once, refusing to apply: a.x.io"},
 		"should refuse a CRD file that merged into the previous one (no leading ---)": {"---\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: a.x.io\nspec: {}\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: b.x.io\nspec: {}\n", "does not parse as 2 separate CRD documents"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -718,5 +719,37 @@ func TestApplyFailsWhenACRDStartsTerminatingDuringTheApply(t *testing.T) {
 	err := Apply(context.Background(), h.d, Options{})
 	if err == nil || !strings.Contains(err.Error(), "the bundle WAS applied, but still terminating") || !strings.Contains(err.Error(), "a.x.io") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestCheckPrintsNoApplyOnlyPlanLines(t *testing.T) {
+	// regression: check reused the apply plan and said "strip", "the apply waits" and "after you confirm"
+	h := newHarness(t, "production", nil, false)
+	h.syncLive()
+	if err := Check(context.Background(), h.d, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, apply := range []string{"strip:", "wait:", "keep:", "migrate:"} {
+		if strings.Contains(h.out.String(), apply) {
+			t.Fatalf("check printed %q: %q", apply, h.out)
+		}
+	}
+}
+
+func TestApplyPlanSaysClientSideApplyOwnershipMigrates(t *testing.T) {
+	// regression: the diff is empty for a client-side-applied CRD whose spec matches, yet apply drops
+	// last-applied-configuration; the plan must say so instead of only "no content changes"
+	h := newHarness(t, "production", nil, true, "yes")
+	h.cl.put(h.src.manifest, func(o *unstructured.Unstructured) {
+		o.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: FieldManager, Operation: "Apply"}})
+		if o.GetName() == "a.x.io" {
+			o.SetAnnotations(map[string]string{"kubectl.kubernetes.io/last-applied-configuration": "{}"})
+		}
+	})
+	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.out.String(), "no content changes") || !strings.Contains(h.out.String(), "migrate: client-side-apply ownership of 1 CRD(s)") {
+		t.Fatalf("%q", h.out)
 	}
 }

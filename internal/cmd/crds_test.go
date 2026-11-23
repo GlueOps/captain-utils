@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/glueops/captain-utils/internal/crds"
 	"github.com/glueops/captain-utils/internal/helmx"
@@ -108,5 +109,25 @@ func TestUnknownSubcommandOfAGroupFailsInsteadOfPrintingHelp(t *testing.T) {
 	// the group on its own still prints help
 	if code, out, _ := run(t, fakeCluster{}, nil, "crds"); code != 0 || !strings.Contains(out, "Available Commands") {
 		t.Fatalf("%d %q", code, out)
+	}
+}
+
+func TestCRDsWaitTimeoutEnvBareNumberIsSeconds(t *testing.T) {
+	// regression: the bash command took CRDS_WAIT_TIMEOUT in seconds; GetDuration read "300" as 300ns,
+	// so every wait timed out at once
+	for env, want := range map[string]time.Duration{
+		"300": 300 * time.Second, "90s": 90 * time.Second, "2m": 2 * time.Minute, "": crds.DefaultWait,
+	} {
+		t.Setenv("CRDS_WAIT_TIMEOUT", env)
+		a := NewApp("v0.0.0-test", "abc", &bytes.Buffer{}, &bytes.Buffer{})
+		a.NewCluster = func(string) (Cluster, error) { return fakeCluster{}, nil }
+		root := a.Root()
+		if err := root.ParseFlags(nil); err != nil {
+			t.Fatal(err)
+		}
+		d, err := a.crdsDeps()
+		if err != nil || d.Wait != want {
+			t.Fatalf("CRDS_WAIT_TIMEOUT=%q: %v %v, want %v", env, d, err, want)
+		}
 	}
 }

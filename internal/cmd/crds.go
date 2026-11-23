@@ -3,6 +3,9 @@ package cmd
 import (
 	"errors"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -30,10 +33,21 @@ func (a *App) crdsDeps() (*crds.Deps, error) {
 		Yes:         o.Yes || os.Getenv("CRDS_AUTO_CONFIRM") == "yes",
 		Paged:       ui.IsTerminal(a.Out),
 		Chart:       a.v.GetString("crds-chart"),
-		Wait:        a.v.GetDuration("crds-wait-timeout"),
+		Wait:        waitTimeout(a.v.GetString("crds-wait-timeout")),
 		GitInfo:     gitinfo.Describe,
 		PathPrefill: a.v.GetString("platform-chart-dir-prefill"),
 	}, nil
+}
+
+// waitTimeout reads --wait-timeout / CRDS_WAIT_TIMEOUT. The bash command took bare seconds
+// ("300"); a Go duration ("90s", "2m") works too. Unset or unparsable gives 0, so Deps uses its default.
+func waitTimeout(s string) time.Duration {
+	s = strings.TrimSpace(s)
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Second
+	}
+	d, _ := time.ParseDuration(s)
+	return d
 }
 
 func (a *App) crdsCmd() *cobra.Command {

@@ -176,13 +176,19 @@ func count(s []string) int { return len(s) }
 // unconditionally: the no-diff branch has no confirm yet still strips ArgoCD
 // tracking, so a plan inside the changed branch would hide precisely the run
 // whose only effect is a mutation.
-func (d *Deps) plan(version string, b *bundle, live []*unstructured.Unstructured, df diffResult) {
+func (d *Deps) plan(version string, b *bundle, live []*unstructured.Unstructured, df diffResult, apply bool) {
 	ann, lab, dying := argoTrackedAnnotation(live), argoTrackedLabel(live), terminating(live)
 	d.P.Highlight("platform-crds %s — %s", version, b.scope())
 	if df.drift() {
 		fmt.Fprintf(d.Out, "  %d new, %d changed\n", df.New, df.Changed)
 	} else {
 		fmt.Fprintln(d.Out, "  apply:  no content changes")
+	}
+	if !apply {
+		return // check changes nothing: strip, wait and keep describe an apply
+	}
+	if n := csaManaged(live); n > 0 {
+		fmt.Fprintf(d.Out, "  migrate: client-side-apply ownership of %d CRD(s) moves to %s (last-applied-configuration is dropped; the diff above does not show it)\n", n, FieldManager)
 	}
 	fmt.Fprintf(d.Out, "  strip:  ArgoCD tracking-id from %d, instance label from %d\n", count(ann), count(lab))
 	// An observation, not a promise: the documented crds -> argocd -> crds order means
@@ -386,7 +392,7 @@ func Apply(ctx context.Context, d *Deps, o Options) error {
 	if err != nil {
 		return fmt.Errorf("diff failed: %w", err)
 	}
-	d.plan(v, b, live, df)
+	d.plan(v, b, live, df, true)
 	if df.drift() {
 		if d.Paged {
 			if err := d.Prompt.Pager(df.Text); err != nil {
@@ -519,7 +525,7 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 	if err != nil {
 		return fmt.Errorf("diff failed: %w", err)
 	}
-	d.plan(v, b, live, df)
+	d.plan(v, b, live, df, false)
 	// a CRD that does not exist yet is not owned either
 	un, missing := unowned(live, FieldManager), b.total()-len(live)
 	if n := len(un) + missing; n > 0 {
