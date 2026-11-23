@@ -109,10 +109,19 @@ func (c *Client) pollCRDs(ctx context.Context, names []string, timeout time.Dura
 type TimeoutError struct {
 	Timeout time.Duration
 	Pending []string
+	// Why maps a pending CRD to what its status says is wrong (an Established wait only).
+	Why map[string]string
 }
 
 func (e *TimeoutError) Error() string {
-	return fmt.Sprintf("timed out after %s: %s", e.Timeout, strings.Join(e.Pending, " "))
+	names := make([]string, len(e.Pending))
+	for i, n := range e.Pending {
+		names[i] = n
+		if w := e.Why[n]; w != "" {
+			names[i] += " (" + w + ")"
+		}
+	}
+	return fmt.Sprintf("timed out after %s: %s", e.Timeout, strings.Join(names, " "))
 }
 
 // WaitCRDsDeleted waits until none of the CRDs exist (kubectl wait --for=delete).
@@ -128,7 +137,8 @@ func (c *Client) WaitCRDsDeleted(ctx context.Context, names []string, timeout ti
 // WaitCRDsEstablished waits until every CRD has condition Established=True
 // (kubectl wait --for=condition=Established).
 func (c *Client) WaitCRDsEstablished(ctx context.Context, names []string, timeout time.Duration) error {
-	return c.pollCRDs(ctx, names, timeout, func(u *unstructured.Unstructured, err error) (bool, error) {
+	why := map[string]string{}
+	err := c.pollCRDs(ctx, names, timeout, func(u *unstructured.Unstructured, err error) (bool, error) {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
@@ -142,8 +152,33 @@ func (c *Client) WaitCRDsEstablished(ctx context.Context, names []string, timeou
 				return true, nil
 			}
 		}
+		why[u.GetName()] = notAccepted(conds)
 		return false, nil
 	})
+	var to *TimeoutError
+	if errors.As(err, &to) {
+		to.Why = why
+	}
+	return err
+}
+
+// notAccepted is the first condition that is not True, "NamesAccepted=False ListKindConflict: <message>".
+func notAccepted(conds []interface{}) string {
+	for _, cd := range conds {
+		m, _ := cd.(map[string]interface{})
+		if m["type"] == "Established" || m["status"] == "True" {
+			continue
+		}
+		out := fmt.Sprintf("%v=%v", m["type"], m["status"])
+		if r, _ := m["reason"].(string); r != "" {
+			out += " " + r
+		}
+		if msg, _ := m["message"].(string); msg != "" {
+			out += ": " + msg
+		}
+		return out
+	}
+	return ""
 }
 
 // lastApplied is the annotation client-side apply keeps its own record in.

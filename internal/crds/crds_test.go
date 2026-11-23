@@ -753,3 +753,23 @@ func TestApplyPlanSaysClientSideApplyOwnershipMigrates(t *testing.T) {
 		t.Fatalf("%q", h.out)
 	}
 }
+
+func TestCheckCRDThatIsNotEstablishedIsDriftNotInSync(t *testing.T) {
+	// regression (found on a k3d cluster): another CRD owning the same kind leaves NamesAccepted=False and
+	// Established=False; the diff is clean and the CRD is owned, yet apply fails on it, so check must not say "in sync"
+	h := newHarness(t, "production", nil, false)
+	h.syncLive()
+	_ = unstructured.SetNestedSlice(h.cl.live["b.x.io"].Object, []interface{}{
+		map[string]interface{}{"type": "Established", "status": "False", "reason": "NotAccepted"},
+	}, "status", "conditions")
+	err := Check(context.Background(), h.d, Options{})
+	if !errors.Is(err, ErrDrift) || len(h.cl.mutations()) != 0 || !strings.Contains(h.errs.String(), "drift: 1 CRD(s) are not Established") || !strings.Contains(h.errs.String(), "same kind): b.x.io") || strings.Contains(h.errs.String(), "in sync") {
+		t.Fatalf("%v %v %q", err, h.cl.calls, h.errs)
+	}
+	// a CRD with no Established condition at all (just created) is not flagged
+	h = newHarness(t, "production", nil, false)
+	h.syncLive()
+	if err := Check(context.Background(), h.d, Options{}); err != nil {
+		t.Fatal(err)
+	}
+}

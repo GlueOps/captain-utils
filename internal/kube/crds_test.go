@@ -158,3 +158,18 @@ func TestRESTConfigRaisesClientSideRateLimits(t *testing.T) {
 		t.Fatalf("%v %+v", err, cfg)
 	}
 }
+
+func TestEstablishedTimeoutSaysWhyTheCRDIsNotAccepted(t *testing.T) {
+	// regression: "timed out after 3s: certificates.cert-manager.io" left the operator to dig the
+	// reason (another CRD owning the same kind) out of the CRD's status
+	b := crdObj("b.x.io", false, nil)
+	_ = unstructured.SetNestedSlice(b.Object, []interface{}{
+		map[string]interface{}{"type": "NamesAccepted", "status": "False", "reason": "ListKindConflict", "message": "\"CertificateList\" is already in use"},
+		map[string]interface{}{"type": "Established", "status": "False", "reason": "NotAccepted"},
+	}, "status", "conditions")
+	err := crdClient(b).WaitCRDsEstablished(context.Background(), []string{"b.x.io"}, 30*time.Millisecond)
+	var to *TimeoutError
+	if !errors.As(err, &to) || to.Pending[0] != "b.x.io" || !strings.Contains(err.Error(), "b.x.io (NamesAccepted=False ListKindConflict: \"CertificateList\" is already in use)") {
+		t.Fatalf("%v", err)
+	}
+}

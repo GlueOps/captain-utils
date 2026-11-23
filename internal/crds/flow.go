@@ -543,6 +543,10 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 		d.P.Warn("drift: %d CRD(s) are terminating and will disappear: %s", len(dying), join(dying))
 		return ErrDrift
 	}
+	if bad := notEstablished(live); len(bad) > 0 {
+		d.P.Warn("drift: %d CRD(s) are not Established (check their status.conditions, e.g. another CRD owning the same kind): %s", len(bad), join(bad))
+		return ErrDrift
+	}
 	if df.drift() {
 		d.P.Warn("drift: this cluster does not match platform-crds %s", v)
 		return ErrDrift

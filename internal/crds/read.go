@@ -24,6 +24,25 @@ func terminating(live []*unstructured.Unstructured) []string {
 	return out
 }
 
+// notEstablished names the CRDs whose Established condition is present and not True (a CRD
+// another CRD's names collide with stays NamesAccepted=False). A CRD with no such condition
+// yet is not named: it was just created.
+func notEstablished(live []*unstructured.Unstructured) []string {
+	var out []string
+	for _, o := range live {
+		if o.GetDeletionTimestamp() != nil {
+			continue // reported as terminating
+		}
+		conds, _, _ := unstructured.NestedSlice(o.Object, "status", "conditions")
+		for _, cd := range conds {
+			if m, _ := cd.(map[string]interface{}); m["type"] == "Established" && m["status"] != "True" {
+				out = append(out, o.GetName())
+			}
+		}
+	}
+	return out
+}
+
 // argoTracked names the CRDs carrying ArgoCD tracking metadata.
 func argoTrackedAnnotation(live []*unstructured.Unstructured) []string {
 	var out []string
