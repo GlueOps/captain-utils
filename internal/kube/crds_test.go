@@ -2,6 +2,8 @@ package kube
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynfake "k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func crdObj(name string, established bool, annotations map[string]interface{}) *unstructured.Unstructured {
@@ -109,5 +112,49 @@ func TestMigrateCRDToSSAOfACRDThatIsNotInstalledYetIsNotAnError(t *testing.T) {
 	c := crdClient()
 	if migrated, err := c.MigrateCRDToSSA(context.Background(), "absent.x.io", "glueops-platform-crds"); err != nil || migrated {
 		t.Fatalf("migrated=%v err=%v", migrated, err)
+	}
+}
+
+func TestWaitThatRunsOutInsideTheRateLimiterIsStillATimeout(t *testing.T) {
+	// regression: a wait whose deadline passed while client-go's rate limiter was holding the request
+	// ("rate: Wait(n=1) would exceed context deadline") surfaced as a generic error, so the operator
+	// never saw "still terminating … a finalizer is holding the type open"
+	fake := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crdObj("a.x.io", true, nil))
+	fake.PrependReactor("get", "customresourcedefinitions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		time.Sleep(80 * time.Millisecond)
+		return true, nil, errors.New("client rate limiter Wait returned an error: rate: Wait(n=1) would exceed context deadline")
+	})
+	c := &Client{Dynamic: fake}
+	err := c.WaitCRDsDeleted(context.Background(), []string{"a.x.io"}, 40*time.Millisecond)
+	var to *TimeoutError
+	if !errors.As(err, &to) || len(to.Pending) != 1 || to.Pending[0] != "a.x.io" {
+		t.Fatalf("%T %v", err, err)
+	}
+}
+
+func TestAnErrorBeforeTheDeadlineIsNotATimeout(t *testing.T) {
+	fake := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"}, crdObj("a.x.io", true, nil))
+	fake.PrependReactor("get", "customresourcedefinitions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("forbidden")
+	})
+	err := (&Client{Dynamic: fake}).WaitCRDsDeleted(context.Background(), []string{"a.x.io"}, time.Minute)
+	var to *TimeoutError
+	if err == nil || errors.As(err, &to) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestRESTConfigRaisesClientSideRateLimits(t *testing.T) {
+	// regression: client-go's default 5 QPS / burst 10 made 89 sequential dry-run applies take ~20s
+	kc := t.TempDir() + "/kc"
+	if err := os.WriteFile(kc, []byte("apiVersion: v1\nkind: Config\ncurrent-context: c\nclusters: [{name: c, cluster: {server: 'https://127.0.0.1:1'}}]\ncontexts: [{name: c, context: {cluster: c, user: u}}]\nusers: [{name: u, user: {token: t}}]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", kc)
+	cfg, err := RESTConfig("", "test")
+	if err != nil || cfg.QPS < 50 || cfg.Burst < 100 {
+		t.Fatalf("%v %+v", err, cfg)
 	}
 }

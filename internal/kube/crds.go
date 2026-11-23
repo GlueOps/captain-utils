@@ -78,6 +78,7 @@ func (c *Client) pollCRDs(ctx context.Context, names []string, timeout time.Dura
 		return err
 	}
 	pending := append([]string(nil), names...)
+	start := time.Now()
 	err = wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
 		var still []string
 		for _, n := range pending {
@@ -94,7 +95,9 @@ func (c *Client) pollCRDs(ctx context.Context, names []string, timeout time.Dura
 		return len(pending) == 0, nil
 	})
 	if err != nil {
-		if ctx.Err() == nil && wait.Interrupted(err) {
+		// the deadline can also expire inside client-go's rate limiter ("rate: Wait(n=1) would exceed
+		// context deadline"), which wait.Interrupted does not recognise: that is still a timeout
+		if ctx.Err() == nil && (wait.Interrupted(err) || time.Since(start) >= timeout) {
 			return &TimeoutError{Timeout: timeout, Pending: pending}
 		}
 		return err
