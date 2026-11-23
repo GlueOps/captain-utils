@@ -18,11 +18,22 @@ menu calls it for each area that has been ported.
 | 1 | `versions diff` (show_diff_table), `aws eks-addons / nodepools / kubernetes` (replaces `script_captain_utils`) | done |
 | 2 | `platform`, `argocd`, `aws calico upgrade`, `pods watch` (Helm SDK, helm-diff's own diff rendering) | done |
 | 3 | `crds` (platform-crds bundle: `check`, `apply`; server-side apply) | done |
-| 4 | the interactive menu, installed as `captain_utils` | |
+| 4 | the interactive menu, installed as `captain_utils` (`captain-utils menu`), `app_chart_preflight` | done |
 
 ## Usage
 
 Run from the captain repo root (or pass `--captain-dir`).
+
+```sh
+captain-utils menu                          # the interactive menu: dev or production, then an item
+captain_utils                               # the same: this binary installed under the old name (see below)
+```
+
+The menu offers what the bash menu did, in the same order: `show_diff_table` (production),
+`crds`, `argocd`, `glueops-platform`, `app_chart_preflight`, `aws`, `inspect_pods` (production),
+`Exit`. Each item runs the subcommand of the same area, so `crds` in the menu is `crds apply`.
+Install this binary as `captain_utils` (`ln -s captain-utils /usr/local/bin/captain_utils`): run
+under that name with no arguments it opens the menu; with arguments it behaves as `captain-utils`.
 
 ```sh
 captain-utils versions diff                 # current vs planned table
@@ -118,6 +129,27 @@ lines to stderr.
   refuses a kustomization that uses anything but `resources`.
 - `aws calico upgrade` asks before deleting the `aws-node` daemonset.
 - An empty diff says so instead of opening an empty pager.
+
+## Changes from the bash menu (phase 4)
+
+- The menu is `captain-utils menu`, and this binary opens it when run as `captain_utils` with no
+  arguments. It needs a terminal; without one it says so and exits 1 (use the subcommands).
+- The environment (dev or production) is chosen in the menu; `--env` and the `environment`
+  variable are ignored there. `--captain-dir`, `--kube-context`, `--yes` and `--no-color` are passed to every item.
+- A step that fails (or that you stop with Ctrl-C) prints its error and returns to the menu.
+  In bash `set -e` ended the whole menu on most failures and Ctrl-C ended it everywhere. Esc or
+  Ctrl-C at a menu still leaves it; `Exit` in the `aws` submenu still leaves the whole menu.
+- `crds` in production keeps the bash flow (not on the bundle: two notes; otherwise the pin,
+  `custom` or `Back`, then a confirm). A leftover `CRDS_AUTO_CONFIRM` in the shell is dropped, so
+  the confirm is always shown. In dev the command's own release chooser is used.
+- No `helm repo update` at start: each item refreshes the repositories it uses.
+- The codespace version check (`codespace_version` pin against `$VERSION`) is skipped, with a
+  note, when there is no pin or no `$VERSION` (bash stopped on either). A mismatch asks first, as before.
+- `show_diff_table` prints the table instead of opening a `gum table` viewer.
+- `app_chart_preflight` is the one program still run as a program: it is a separately released
+  tool (`app-chart-preflight`, or `$CAPTAIN_UTILS_PREFLIGHT`). The prompts, the list of
+  ApplicationSets from `manifests/manifest.yaml` and the verdict messages are the bash menu's.
+- `inspect_pods` is `pods watch`: Ctrl-C returns to the menu.
 
 ## Changes from the bash `crds` command (phase 3)
 

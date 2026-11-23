@@ -9,7 +9,9 @@ the phase table.
 
 - `main.go`: sets `version`/`commit` (ldflags) and calls `internal/cmd`.
 - `internal/cmd`: cobra tree + viper (flag > env > default). One file per area. `App.NewCluster`
-  is the seam tests replace.
+  is the seam tests replace. `menu.go` is the interactive menu: every item runs a subcommand
+  through a child `App`, so the menu cannot drift from the commands; `app_chart_preflight` is the
+  one exec.
 - `internal/captain`: reads the captain repo (VERSIONS pins, paths). Never writes.
 - `internal/kube`: client-go reads; Helm releases are read from Helm's own Secrets.
 - `internal/aws`: line-based main.tf edits (golden files in `testdata/`), tfstate reader.
@@ -27,8 +29,8 @@ the phase table.
 
 ## Rules
 
-- No exec of helm, kubectl, gh, gum, yq, jq or python. The one exception planned is
-  `app-chart-preflight` (a separately released tool).
+- No exec of helm, kubectl, gh, gum, yq, jq or python. The one exception is
+  `app-chart-preflight` (a separately released tool), run by the menu.
 - `helmx.Diff` must keep printing what `helm diff upgrade --allow-unreleased` prints: compare
   against the plugin on a real captain after touching it.
 - Behaviour is ported as it was, prompt wording and menu order included; any deliberate change

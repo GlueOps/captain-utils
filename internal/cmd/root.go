@@ -123,9 +123,9 @@ func (a *App) Root() *cobra.Command {
 		Long: `captain-utils upgrades and inspects a GlueOps captain (cluster) from the root of
 its captain repo, using your current kube context.
 
-It is the Go replacement of the codespace's captain_utils menu, landing one
-area at a time. Every menu item becomes a subcommand with flags; the menu
-itself moves here last.`,
+It is the Go replacement of the codespace's captain_utils menu. Every menu item
+is a subcommand with flags, and "captain-utils menu" (or this binary run as
+captain_utils with no arguments) is the menu itself.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       a.Version,
@@ -158,7 +158,7 @@ itself moves here last.`,
 	a.v.SetDefault("platform-chart-dir-prefill", "/workspaces/")
 	_ = a.v.BindEnv("platform-chart-dir-prefill", "PLATFORM_CHART_DIR_PREFILL")
 
-	root.AddCommand(a.versionCmd(), a.versionsCmd(), a.awsCmd(), a.platformCmd(), a.argocdCmd(), a.crdsCmd(), a.podsCmd())
+	root.AddCommand(a.versionCmd(), a.versionsCmd(), a.awsCmd(), a.platformCmd(), a.argocdCmd(), a.crdsCmd(), a.podsCmd(), a.menuCmd())
 	rejectUnknownSubcommands(root)
 	return root
 }
@@ -212,7 +212,7 @@ func Main(version, commit string) int {
 	defer stop()
 	// API server warnings once each, as "Warning: ..." (as kubectl and helm print them), not as klog lines
 	rest.SetDefaultWarningHandler(rest.NewWarningWriter(os.Stderr, rest.WarningWriterOptions{Deduplicate: true}))
-	return NewApp(version, commit, os.Stdout, os.Stderr).Execute(ctx, os.Args[1:])
+	return NewApp(version, commit, os.Stdout, os.Stderr).Execute(ctx, menuArgs(os.Args[0], os.Args[1:]))
 }
 
 // rejectUnknownSubcommands makes a group command (one that only has subcommands)
