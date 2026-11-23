@@ -141,6 +141,12 @@ lines to stderr.
   `apply` refuses to, and the type is about to disappear.
 - On a cluster that has none of the bundle's CRDs, `check` says `87 not yet owned ... (87 not on
   the cluster yet)`, where the bash command said "all 87 owned".
+- `check` also reports **drift** when a bundle CRD is not Established (another CRD owning the same
+  kind leaves it `NamesAccepted=False`): the diff is clean, yet `apply` fails on it. The apply's
+  Established timeout names the reason from the CRD's status.
+- A CRD whose content matches but that our field manager does not own yet is **in sync** for `check`
+  (exit 0), as it is for `apply`; the verdict says `(content); N CRD(s) not yet owned`. Pass
+  `--require-owned` to make that exit 1.
 - Before it applies, `apply` hands client-side-apply ownership over to the field manager (what
   `kubectl apply --server-side` does), so the `last-applied-configuration` annotation and the
   `kubectl-client-side-apply` manager are dropped from CRDs an older installer created. Checked

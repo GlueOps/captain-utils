@@ -131,3 +131,10 @@ func TestCRDsWaitTimeoutEnvBareNumberIsSeconds(t *testing.T) {
 		}
 	}
 }
+
+func TestCRDsCheckHasRequireOwnedFlag(t *testing.T) {
+	code, out, _ := runCRDs(t, captainDir(t), "crds", "check", "--help")
+	if code != 0 || !strings.Contains(out, "--require-owned") {
+		t.Fatalf("%d %q", code, out)
+	}
+}

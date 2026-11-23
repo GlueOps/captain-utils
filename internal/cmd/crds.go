@@ -74,19 +74,21 @@ orphans the custom resources of a terminating CRD.`,
 	_ = a.v.BindEnv("crds-wait-timeout", "CRDS_WAIT_TIMEOUT", "CAPTAIN_UTILS_CRDS_WAIT_TIMEOUT")
 
 	var o crds.Options
+	var requireOwned bool
 	add := func(cmd *cobra.Command) *cobra.Command {
 		cmd.Flags().StringVar(&o.Version, "version", "", "bundle release tag vX.Y.Z (default: the VERSIONS/glueops.yaml pin; dev apply: a chooser)")
 		cmd.Flags().StringVar(&o.ChartDir, "chart-dir", "", "a local platform-crds checkout rendered by hack/render.sh (custom)")
 		cmd.MarkFlagsMutuallyExclusive("version", "chart-dir")
 		return cmd
 	}
-	c.AddCommand(add(&cobra.Command{
+	checkCmd := &cobra.Command{
 		Use:   "check",
 		Short: "Read-only: is the cluster in sync with the bundle? (exit 0 in sync, 1 drift, 2 failure)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			d, err := a.crdsDeps()
 			if err == nil {
+				o.RequireOwned = requireOwned
 				err = crds.Check(cmd.Context(), d, o)
 			}
 			switch {
@@ -97,7 +99,9 @@ orphans the custom resources of a terminating CRD.`,
 			}
 			return &ExitError{Code: 2, Err: err}
 		},
-	}), add(&cobra.Command{
+	}
+	checkCmd.Flags().BoolVar(&requireOwned, "require-owned", false, "also exit 1 when a CRD is not yet owned by the glueops-platform-crds field manager (default: a note; apply moves ownership)")
+	c.AddCommand(add(checkCmd), add(&cobra.Command{
 		Use:   "apply",
 		Short: "Diff, confirm, strip ArgoCD tracking, server-side apply, wait Established",
 		Args:  cobra.NoArgs,

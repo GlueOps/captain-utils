@@ -79,6 +79,8 @@ func (d *Deps) wait() time.Duration {
 type Options struct {
 	Version  string // a release tag; empty = the pin (production) or a chooser (dev apply)
 	ChartDir string // a local platform-crds checkout
+	// RequireOwned (check): CRDs not yet owned by our field manager are drift, not just a note.
+	RequireOwned bool
 }
 
 func isDir(p string) bool {
@@ -528,7 +530,8 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 	d.plan(v, b, live, df, false)
 	// a CRD that does not exist yet is not owned either
 	un, missing := unowned(live, FieldManager), b.total()-len(live)
-	if n := len(un) + missing; n > 0 {
+	notOwned := len(un) + missing
+	if n := notOwned; n > 0 {
 		detail := join(un)
 		if missing > 0 {
 			detail = strings.TrimSpace(fmt.Sprintf("%s (%d not on the cluster yet)", detail, missing))
@@ -550,6 +553,15 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 	if df.drift() {
 		d.P.Warn("drift: this cluster does not match platform-crds %s", v)
 		return ErrDrift
+	}
+	if notOwned > 0 {
+		// content matches, as apply also calls it; ownership is bookkeeping unless the caller asked for it
+		if o.RequireOwned {
+			d.P.Warn("drift: %d CRD(s) are not owned by %s (--require-owned)", notOwned, FieldManager)
+			return ErrDrift
+		}
+		d.P.Info("✅ in sync with platform-crds %s (content); %d CRD(s) not yet owned by %s — apply moves ownership", v, notOwned, FieldManager)
+		return nil
 	}
 	d.P.Info("✅ in sync with platform-crds %s", v)
 	return nil

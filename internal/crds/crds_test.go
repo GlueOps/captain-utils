@@ -773,3 +773,31 @@ func TestCheckCRDThatIsNotEstablishedIsDriftNotInSync(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCheckInSyncButNotOwnedSaysSoAndExitsZeroByDefault(t *testing.T) {
+	// content matches, a manager other than ours owns the fields: apply calls this in sync too, so check
+	// exits 0, but "✅ in sync" directly under "N not yet owned" read as a contradiction
+	h := newHarness(t, "production", nil, false)
+	h.cl.put(h.src.manifest, nil) // live, same content, no managedFields
+	if err := Check(context.Background(), h.d, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.errs.String(), "in sync with platform-crds v0.1.6 (content); 2 CRD(s) not yet owned by glueops-platform-crds — apply moves ownership") {
+		t.Fatalf("%q", h.errs)
+	}
+}
+
+func TestCheckRequireOwnedFailsOnUnownedCRDs(t *testing.T) {
+	h := newHarness(t, "production", nil, false)
+	h.cl.put(h.src.manifest, nil)
+	err := Check(context.Background(), h.d, Options{RequireOwned: true})
+	if !errors.Is(err, ErrDrift) || len(h.cl.mutations()) != 0 || !strings.Contains(h.errs.String(), "drift: 2 CRD(s) are not owned by glueops-platform-crds") {
+		t.Fatalf("%v %q", err, h.errs)
+	}
+	// owned: passes
+	h = newHarness(t, "production", nil, false)
+	h.syncLive()
+	if err := Check(context.Background(), h.d, Options{RequireOwned: true}); err != nil {
+		t.Fatal(err)
+	}
+}
