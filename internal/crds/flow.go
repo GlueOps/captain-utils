@@ -477,51 +477,65 @@ var ErrDrift = errors.New("drift")
 // never reaches clear or doApply, and the diff is a server-side dry run. It
 // returns ErrDrift for drift and any other error for a failure.
 func Check(ctx context.Context, d *Deps, o Options) error {
+	_, err := CheckResult(ctx, d, o)
+	return err
+}
+
+// CheckResult is Check that also returns what it found, for scripts. The result is nil when the
+// run failed before it had read the cluster (bad flags, fetch failure); otherwise it is filled
+// in even when the error is ErrDrift.
+func CheckResult(ctx context.Context, d *Deps, o Options) (*CheckReport, error) {
 	if isDir(d.Chart) {
-		return fmt.Errorf("--chart '%s' is a directory — check reads a released bundle, use --chart-dir", d.Chart)
+		return nil, fmt.Errorf("--chart '%s' is a directory — check reads a released bundle, use --chart-dir", d.Chart)
 	}
 	var t target
 	switch {
 	case o.ChartDir != "":
 		var err error
 		if t, _, err = d.localTarget(o.ChartDir, false); err != nil {
-			return err
+			return nil, err
 		}
 	case o.Version != "":
 		t = target{version: o.Version}
 	case !d.Prompt.Interactive():
 		// like apply: scripts name the version they check, nothing falls back to the pin
-		return errNeedVersion()
+		return nil, errNeedVersion()
 	default:
 		// at a terminal the pin, read directly: no chooser, check is read-only
 		v, err := d.Repo.PlatformCRDsPin()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		t = target{version: v}
 	}
 	if t.dir == "" {
 		if err := validVersion(t.version); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	v := t.label()
 	b, err := d.fetch(ctx, v, t.dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	live, err := d.preflight(ctx, b)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	df, err := d.diff(ctx, b, live)
 	if err != nil {
-		return fmt.Errorf("diff failed: %w", err)
+		return nil, fmt.Errorf("diff failed: %w", err)
 	}
 	d.plan(v, b, live, df, false)
 	// a CRD that does not exist yet is not owned either
 	un, missing := unowned(live, FieldManager), b.total()-len(live)
 	notOwned := len(un) + missing
+	rep := newCheckReport(v, b.total())
+	rep.New, rep.Changed = df.New, df.Changed
+	rep.Differs = nonNil(df.Names)
+	rep.NotOwned, rep.NotOnCluster = nonNil(un), missing
+	rep.Terminating = nonNil(terminating(live))
+	rep.NotEstablished = nonNil(notEstablished(live))
 	if n := notOwned; n > 0 {
 		detail := join(un)
 		if missing > 0 {
@@ -531,31 +545,44 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 	} else {
 		fmt.Fprintf(d.Out, "  own:    all %d owned by %s\n", b.total(), FieldManager)
 	}
+	// drift records why the cluster is not in sync, warns, and keeps the first-found order of
+	// the old early returns: terminating, then not Established, then content, then ownership.
+	drift := func(format string, args ...any) (*CheckReport, error) {
+		msg := fmt.Sprintf(format, args...)
+		rep.Reasons = append(rep.Reasons, msg)
+		d.P.Warn("%s", "drift: "+msg)
+		return rep, ErrDrift
+	}
 	// A CRD that is being deleted still has its spec, so it diffs as identical, but it is not
 	// in sync: the type is about to disappear. apply refuses to call that state in sync too.
-	if dying := terminating(live); len(dying) > 0 {
-		d.P.Warn("drift: %d CRD(s) are terminating and will disappear: %s", len(dying), join(dying))
-		return ErrDrift
+	if dying := rep.Terminating; len(dying) > 0 {
+		return drift("%d CRD(s) are terminating and will disappear: %s", len(dying), join(dying))
 	}
-	if bad := notEstablished(live); len(bad) > 0 {
-		d.P.Warn("drift: %d CRD(s) are not Established (check their status.conditions, e.g. another CRD owning the same kind): %s", len(bad), join(bad))
-		return ErrDrift
+	if bad := rep.NotEstablished; len(bad) > 0 {
+		return drift("%d CRD(s) are not Established (check their status.conditions, e.g. another CRD owning the same kind): %s", len(bad), join(bad))
 	}
 	if df.drift() {
-		d.P.Warn("drift: this cluster does not match platform-crds %s", v)
-		return ErrDrift
+		return drift("this cluster does not match platform-crds %s", v)
 	}
 	if notOwned > 0 {
 		// content matches, as apply also calls it; ownership is bookkeeping unless the caller asked for it
 		if o.RequireOwned {
-			d.P.Warn("drift: %d CRD(s) are not owned by %s (--require-owned)", notOwned, FieldManager)
-			return ErrDrift
+			return drift("%d CRD(s) are not owned by %s (--require-owned)", notOwned, FieldManager)
 		}
+		rep.InSync = true
 		d.P.Info("✅ in sync with platform-crds %s (content); %d CRD(s) not yet owned by %s — apply moves ownership", v, notOwned, FieldManager)
-		return nil
+		return rep, nil
 	}
+	rep.InSync = true
 	d.P.Info("✅ in sync with platform-crds %s", v)
-	return nil
+	return rep, nil
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 // secs prints a duration the way the bash command did: 120s, not 2m0s.

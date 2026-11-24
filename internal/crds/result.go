@@ -24,7 +24,12 @@ type Result struct {
 	Unchanged   []string  `json:"unchanged"`
 	Failed      []Failure `json:"failed"`
 	Established bool      `json:"established"`
+	// Error is why the run did not finish: a failure (exit 1 or 2) or a declined confirm (exit 3).
+	Error string `json:"error,omitempty"`
 }
+
+// NewResult is an empty result for a run that stopped before it looked at any CRD.
+func NewResult(version string) *Result { return newResult(version) }
 
 func newResult(version string) *Result {
 	return &Result{Version: version, Applied: []string{}, Unchanged: []string{}, Failed: []Failure{}}
@@ -44,10 +49,12 @@ func (r *Result) WriteText(w io.Writer) {
 }
 
 // WriteJSON prints the result as one JSON object.
-func (r *Result) WriteJSON(w io.Writer) error {
+func (r *Result) WriteJSON(w io.Writer) error { return writeJSON(w, r) }
+
+func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(r)
+	return enc.Encode(v)
 }
 
 // settle files the bundle's CRDs into Applied / Unchanged after an apply: applied are the
@@ -87,4 +94,42 @@ func failureText(fs []Failure) string {
 		parts = append(parts, f.Error)
 	}
 	return strings.Join(parts, "\n")
+}
+
+// CheckReport is what a check found, for scripts (check -o json). InSync is true exactly when
+// check exits 0. Reasons says why not, in the words of the drift warning. NotOwned and
+// NotOnCluster only make it drift with --require-owned.
+type CheckReport struct {
+	Version        string   `json:"version"`
+	InSync         bool     `json:"inSync"`
+	Total          int      `json:"total"`
+	New            int      `json:"new"`
+	Changed        int      `json:"changed"`
+	Differs        []string `json:"differs"`
+	Terminating    []string `json:"terminating"`
+	NotEstablished []string `json:"notEstablished"`
+	NotOwned       []string `json:"notOwned"`
+	NotOnCluster   int      `json:"notOnCluster"`
+	Reasons        []string `json:"reasons"`
+	// Error is set instead of the findings when the check itself failed (exit 2).
+	Error string `json:"error,omitempty"`
+}
+
+// NewCheckReport is an empty report: every list is [] so a script can iterate it.
+func NewCheckReport(version string, total int) *CheckReport { return newCheckReport(version, total) }
+
+func newCheckReport(version string, total int) *CheckReport {
+	return &CheckReport{
+		Version: version, Total: total,
+		Differs: []string{}, Terminating: []string{}, NotEstablished: []string{}, NotOwned: []string{}, Reasons: []string{},
+	}
+}
+
+// WriteJSON prints the report as one JSON object.
+// Lists that were never set print as [], not null.
+func (r *CheckReport) WriteJSON(w io.Writer) error {
+	for _, l := range []*[]string{&r.Differs, &r.Terminating, &r.NotEstablished, &r.NotOwned, &r.Reasons} {
+		*l = nonNil(*l)
+	}
+	return writeJSON(w, r)
 }

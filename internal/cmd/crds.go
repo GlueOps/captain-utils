@@ -78,6 +78,7 @@ orphans the custom resources of a terminating CRD.`,
 
 	var o crds.Options
 	var requireOwned bool
+	var checkOutput, output string
 	add := func(cmd *cobra.Command) *cobra.Command {
 		cmd.Flags().StringVar(&o.Version, "version", "", "bundle release tag vX.Y.Z (required without a terminal; at a terminal apply offers the pin in a chooser, check uses it)")
 		cmd.Flags().StringVar(&o.ChartDir, "chart-dir", "", "a local platform-crds checkout rendered by hack/render.sh (custom)")
@@ -89,10 +90,29 @@ orphans the custom resources of a terminating CRD.`,
 		Short: "Read-only: is the cluster in sync with the bundle? (exit 0 in sync, 1 drift, 2 failure or usage error)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if checkOutput != "text" && checkOutput != "json" {
+				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", checkOutput)}
+			}
 			d, err := a.crdsDeps()
+			if err == nil && checkOutput == "json" {
+				// stdout is only the JSON: the plan lines go to stderr with the other status
+				d.Out = a.Err
+			}
+			var rep *crds.CheckReport
 			if err == nil {
 				o.RequireOwned = requireOwned
-				err = crds.Check(cmd.Context(), d, o)
+				rep, err = crds.CheckResult(cmd.Context(), d, o)
+			}
+			if checkOutput == "json" {
+				if rep == nil {
+					rep = crds.NewCheckReport(o.Version, 0)
+					if err != nil {
+						rep.Error = err.Error()
+					}
+				}
+				if jerr := rep.WriteJSON(a.Out); jerr != nil && err == nil {
+					err = jerr
+				}
 			}
 			switch {
 			case err == nil:
@@ -104,7 +124,6 @@ orphans the custom resources of a terminating CRD.`,
 		},
 	}
 	checkCmd.Flags().BoolVar(&requireOwned, "require-owned", false, "also exit 1 when a CRD is not yet owned by the glueops-platform-crds field manager (default: a note; apply moves ownership)")
-	var output string
 	applyCmd := add(&cobra.Command{
 		Use:   "apply",
 		Short: "Diff, confirm, strip ArgoCD tracking, server-side apply, wait Established",
@@ -120,27 +139,35 @@ A declined confirm exits 3; a partial failure exits 1 with the failed CRDs in th
 				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", output)}
 			}
 			d, err := a.crdsDeps()
-			if err != nil {
-				return err
+			var res *crds.Result
+			if err == nil {
+				if output == "json" {
+					d.Out = a.Err
+					d.Paged = false
+				}
+				res, err = crds.ApplyResult(cmd.Context(), d, o)
 			}
 			if output == "json" {
-				d.Out = a.Err
-				d.Paged = false
-			}
-			res, err := crds.ApplyResult(cmd.Context(), d, o)
-			if res != nil && !errors.Is(err, ui.ErrUsage) {
-				if output == "json" {
+				// always one object on stdout, also for a usage error or a failure before any CRD
+				if res == nil && err != nil {
+					res = crds.NewResult(o.Version)
+				}
+				if res != nil {
+					if err != nil {
+						res.Error = err.Error()
+					}
 					if jerr := res.WriteJSON(a.Out); jerr != nil && err == nil {
 						err = jerr
 					}
-				} else {
-					res.WriteText(a.Out)
 				}
+			} else if res != nil && !errors.Is(err, ui.ErrUsage) {
+				res.WriteText(a.Out)
 			}
 			return err
 		},
 	})
 	applyCmd.Flags().StringVarP(&output, "output", "o", "text", "result format: text or json")
+	checkCmd.Flags().StringVarP(&checkOutput, "output", "o", "text", "result format: text or json ({version, inSync, total, new, changed, differs, terminating, notEstablished, notOwned, notOnCluster, reasons}; stdout is only the JSON)")
 	c.AddCommand(add(checkCmd), applyCmd)
 	return c
 }

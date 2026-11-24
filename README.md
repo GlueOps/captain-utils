@@ -57,6 +57,7 @@ captain-utils pods watch                    # unhealthy pods, every 5s; --once, 
 
 ```sh
 captain-utils crds check --version v0.1.6   # read-only; exit 0 in sync, 1 drift, 2 failure
+captain-utils crds check --version v0.1.6 -o json   # the findings as JSON on stdout (plan on stderr)
 captain-utils crds apply --version v0.1.6   # diff, confirm, apply; ends with applied=N unchanged=N failed=N
 captain-utils crds apply --version v0.1.6 --yes -o json   # the result as JSON on stdout (plan and diff on stderr)
 captain-utils crds apply --chart-dir ~/platform-crds   # "custom": a checkout rendered by hack/render.sh
@@ -92,9 +93,28 @@ pin (plus `custom` and `Back` where they exist).
 
 `crds apply` ends with one result on stdout, `applied=N unchanged=N failed=N` plus a line per failed
 CRD, or with `-o json`: `{"version", "applied": [...], "unchanged": [...], "failed": [{"name", "error"}],
-"established": true|false}`. `applied` are CRDs applied with a content change, `unchanged` ones with none,
+"established": true|false, "error"}`. `applied` are CRDs applied with a content change, `unchanged` ones with none,
 `established` is true once the post-apply wait saw every bundle CRD Established. A declined or in-sync run
-applies nothing. The menu treats 3 as skipped, not as a failure.
+applies nothing; `error` is set whenever the run did not finish (a failure, a usage error, a declined confirm), and
+`applied` still lists what was applied when only the post-apply check failed. The menu treats 3 as skipped, not as a failure.
+
+`-o json` is also on `crds check`, `platform diff|upgrade`, `argocd diff|upgrade` and `aws calico upgrade`.
+Stdout is then one JSON object and nothing else (the plan, status and helm text go to stderr); exit
+codes are unchanged. A failure or a declined confirm still prints the object, with `error` set, so a
+script reads one stream. That includes a usage error from the flow (for example a missing `--version`
+without a terminal): exit 2, the object with `error` set and no findings. Only a command line cobra
+rejects before the command runs (an unknown flag, `-o yaml`) prints no JSON, because the format is not known yet.
+Lists are always `[]`, never `null`.
+
+- `crds check`: `{"version", "inSync", "total", "new", "changed", "differs": [...], "terminating": [...],
+  "notEstablished": [...], "notOwned": [...], "notOnCluster", "reasons": [...], "error"}`. `inSync` is true
+  exactly when the exit code is 0. When the check itself failed, `error` is set and the lists are empty.
+- upgrades: `{"release", "namespace", "chart", "version", "action", "changed", "diff", "diffLines", "status",
+  "revision", "notes", "error"}`. `action` is `diff` (a diff command), `installed` or `upgraded`, `declined` (exit 3) or
+  `none` (stopped before the upgrade, see `error`). `changed` and `diff` are the helm diff, which -o json keeps
+  out of the pager; `diff` is empty when nothing changed. Run `diff -o json`, then `upgrade --yes -o json`.
+  `--no-diff` (with `-o json` only; exit 2 otherwise) leaves the diff text out, which for the platform chart is
+  about 160 KB: `changed` and `diffLines` still say whether and how much changed.
 
 The `aws` main.tf commands edit `terraform/kubernetes/main.tf` and nothing else: review
 the diff, commit, and run terraform as usual. They also accept the old menu
@@ -214,6 +234,12 @@ lines to stderr.
   that no longer exists did nothing and looked successful.
 
 - `crds apply` ends with a result line (or `-o json`), and exits 3 when declined; see "Exit codes".
+- `-o json` answers on stdout for usage errors and early failures too (exit codes unchanged), lists
+  are `[]` instead of `null`, `crds apply -o json` has an `error` field, and `--no-diff` drops the diff text from
+  an upgrade result (`diffLines` keeps its size).
+- Fixed: `platform|argocd|calico upgrade` created objects the chart renders without `metadata.namespace`
+  (the platform chart's Applications and AppProject) in the kubeconfig's default namespace instead of the
+  release's, so ArgoCD reported `project glueops-core does not exist`. The release record was right; the objects were not.
 - `CAPTAIN_UTILS_YES` is removed (only `--yes` / `-y` approves), like `CRDS_AUTO_CONFIRM`.
 
 ## Development

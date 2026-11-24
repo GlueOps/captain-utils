@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -43,6 +45,49 @@ func (a *App) deps(diffOnly bool) (*upgrade.Deps, error) {
 	}, nil
 }
 
+// runFlow runs one upgrade flow with the -o text|json choice. With json, stdout is only the
+// result object: the flow's own text and status go to stderr, the diff goes into the result
+// (unless noDiff), and a failure, a usage error or a declined confirm is also written there
+// (with "error"), besides the exit code and the message on stderr.
+func (a *App) runFlow(output string, noDiff, diffOnly bool, flow func(d *upgrade.Deps, out io.Writer) error) error {
+	if output != "text" && output != "json" {
+		return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", output)}
+	}
+	if noDiff && output != "json" {
+		return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--no-diff only applies to -o json")}
+	}
+	d, err := a.deps(diffOnly)
+	if output == "text" {
+		if err != nil {
+			return err
+		}
+		return flow(d, a.Out)
+	}
+	res := upgrade.NewResult()
+	if err == nil {
+		d.Color = false
+		d.Result, d.NoDiff = res, noDiff
+		err = flow(d, a.Err)
+	}
+	switch {
+	case errors.Is(err, ui.ErrDeclined):
+		res.Action = upgrade.ActionDeclined
+		res.Error = err.Error()
+	case err != nil:
+		res.Error = err.Error()
+	}
+	if jerr := res.WriteJSON(a.Out); jerr != nil && err == nil {
+		err = jerr
+	}
+	return err
+}
+
+func addOutputFlag(c *cobra.Command, output *string, noDiff *bool) *cobra.Command {
+	c.Flags().StringVarP(output, "output", "o", "text", "result format: text or json (stdout is then only the JSON: {release, namespace, chart, version, action, changed, diff, diffLines, status, revision, notes, error})")
+	c.Flags().BoolVar(noDiff, "no-diff", false, "with -o json: leave the helm diff text out of the result (changed and diffLines still say whether and how much it changed)")
+	return c
+}
+
 func (a *App) platformCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "platform",
@@ -57,11 +102,13 @@ checkout of GlueOps/platform-helm-chart-platform instead ("custom"), recorded in
 release description.`,
 	}
 	var o upgrade.PlatformOptions
+	var output string
+	var noDiff bool
 	add := func(cmd *cobra.Command) *cobra.Command {
 		cmd.Flags().StringVar(&o.Version, "version", "", "chart version (required without a terminal; at a terminal a chooser offers the pin)")
 		cmd.Flags().StringVar(&o.ChartDir, "chart-dir", "", "install from this local chart directory (custom)")
 		cmd.MarkFlagsMutuallyExclusive("version", "chart-dir")
-		return cmd
+		return addOutputFlag(cmd, &output, &noDiff)
 	}
 	c.AddCommand(add(&cobra.Command{
 		Use:   "diff",
@@ -69,22 +116,18 @@ release description.`,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			o.DiffOnly = true
-			d, err := a.deps(true)
-			if err != nil {
-				return err
-			}
-			return upgrade.Platform(cmd.Context(), d, o, a.Out)
+			return a.runFlow(output, noDiff, true, func(d *upgrade.Deps, out io.Writer) error {
+				return upgrade.Platform(cmd.Context(), d, o, out)
+			})
 		},
 	}), add(&cobra.Command{
 		Use:   "upgrade",
 		Short: "Diff, confirm, helm upgrade --install",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			d, err := a.deps(false)
-			if err != nil {
-				return err
-			}
-			return upgrade.Platform(cmd.Context(), d, o, a.Out)
+			return a.runFlow(output, noDiff, false, func(d *upgrade.Deps, out io.Writer) error {
+				return upgrade.Platform(cmd.Context(), d, o, out)
+			})
 		},
 	}))
 	return c
@@ -101,9 +144,11 @@ ArgoCD's CRDs come from the platform-crds bundle, not from this step: run crds
 before and after it. Without a terminal, --version is required.`,
 	}
 	var o upgrade.ArgocdOptions
+	var output string
+	var noDiff bool
 	add := func(cmd *cobra.Command) *cobra.Command {
 		cmd.Flags().StringVar(&o.Version, "version", "", "argo-cd chart version (required without a terminal; at a terminal a chooser offers the pin)")
-		return cmd
+		return addOutputFlag(cmd, &output, &noDiff)
 	}
 	c.AddCommand(add(&cobra.Command{
 		Use:   "diff",
@@ -111,22 +156,18 @@ before and after it. Without a terminal, --version is required.`,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			o.DiffOnly = true
-			d, err := a.deps(true)
-			if err != nil {
-				return err
-			}
-			return upgrade.Argocd(cmd.Context(), d, o, a.Out)
+			return a.runFlow(output, noDiff, true, func(d *upgrade.Deps, out io.Writer) error {
+				return upgrade.Argocd(cmd.Context(), d, o, out)
+			})
 		},
 	}), add(&cobra.Command{
 		Use:   "upgrade",
 		Short: "Diff, confirm, helm upgrade --install",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			d, err := a.deps(false)
-			if err != nil {
-				return err
-			}
-			return upgrade.Argocd(cmd.Context(), d, o, a.Out)
+			return a.runFlow(output, noDiff, false, func(d *upgrade.Deps, out io.Writer) error {
+				return upgrade.Argocd(cmd.Context(), d, o, out)
+			})
 		},
 	}))
 	return c
@@ -134,18 +175,18 @@ before and after it. Without a terminal, --version is required.`,
 
 func (a *App) calicoCmd() *cobra.Command {
 	c := &cobra.Command{Use: "calico", Short: "Calico on EKS (menu: aws → calico)"}
-	c.AddCommand(&cobra.Command{
+	var output string
+	var noDiff bool
+	c.AddCommand(addOutputFlag(&cobra.Command{
 		Use:   "upgrade",
 		Short: "Diff, confirm, delete the aws-node daemonset and helm upgrade --install calico at the pin",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			d, err := a.deps(false)
-			if err != nil {
-				return err
-			}
-			return upgrade.Calico(cmd.Context(), d, a.Out)
+			return a.runFlow(output, noDiff, false, func(d *upgrade.Deps, out io.Writer) error {
+				return upgrade.Calico(cmd.Context(), d, out)
+			})
 		},
-	})
+	}, &output, &noDiff))
 	return c
 }
 

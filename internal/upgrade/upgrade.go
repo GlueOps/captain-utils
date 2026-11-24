@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/glueops/captain-utils/internal/captain"
 	"github.com/glueops/captain-utils/internal/helmx"
@@ -39,6 +40,11 @@ type Deps struct {
 	Yes     bool // --yes: confirmations answer yes
 	Color   bool // colour the helm diff
 	GitInfo func(dir string) string
+	// Result, when set, collects what the flow did for -o json. The flow then keeps the helm
+	// diff out of the output and the pager: it goes into Result.Diff.
+	Result *Result
+	// NoDiff (-o json --no-diff) leaves the diff text out of Result: Changed and DiffLines remain.
+	NoDiff bool
 	// PathPrefill starts the local-directory prompt (PLATFORM_CHART_DIR_PREFILL).
 	PathPrefill string
 }
@@ -79,11 +85,26 @@ func (d *Deps) choose(title, flag string, options ...string) (string, error) {
 // showDiff renders the helm diff and pages it (or prints it with diffOnly).
 func (d *Deps) showDiff(ctx context.Context, r helmx.Release, diffOnly bool, out io.Writer) error {
 	var buf bytes.Buffer
+	d.Result.release(r)
 	changed, err := d.Helm.Diff(ctx, r, helmx.DiffOptions{Color: d.Color}, &buf)
 	if err != nil {
 		return err
 	}
+	if d.Result != nil {
+		d.Result.Changed, d.Result.DiffLines = &changed, strings.Count(buf.String(), "\n")
+		if !d.NoDiff {
+			d.Result.Diff = buf.String()
+		}
+		if diffOnly {
+			d.Result.Action = ActionDiff
+		}
+	}
 	switch {
+	case d.Result != nil:
+		// -o json: the diff is in the result, nothing to print or page
+		if !changed {
+			d.P.Note("helm diff: no changes for %s in %s", r.Name, r.Namespace)
+		}
 	case !changed:
 		d.P.Note("helm diff: no changes for %s in %s", r.Name, r.Namespace)
 	case diffOnly:
@@ -102,13 +123,17 @@ func (d *Deps) showDiff(ctx context.Context, r helmx.Release, diffOnly bool, out
 func (d *Deps) upgrade(ctx context.Context, r helmx.Release, out io.Writer) error {
 	d.P.Highlight("The following commands will be executed:")
 	d.P.Note("+ %s", r.Command())
+	d.Result.release(r)
 	res, err := d.Helm.Upgrade(ctx, r)
 	if err != nil {
 		return err
 	}
-	verb := "upgraded"
+	verb := ActionUpgraded
 	if res.Installed {
-		verb = "installed"
+		verb = ActionInstalled
+	}
+	if d.Result != nil {
+		d.Result.Action, d.Result.Status, d.Result.Revision, d.Result.Notes = verb, res.Status, res.Revision, res.Notes
 	}
 	fmt.Fprintf(out, "Release %q has been %s. Happy Helming!\nNAME: %s\nNAMESPACE: %s\nSTATUS: %s\nREVISION: %d\n", res.Name, verb, res.Name, res.Namespace, res.Status, res.Revision)
 	if res.Notes != "" {
