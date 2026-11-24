@@ -34,23 +34,16 @@ type Cluster interface {
 	WaitCRDsEstablished(ctx context.Context, names []string, timeout time.Duration) error
 }
 
-// Releases lists GitHub release tags (dev mode's version list).
-type Releases interface {
-	ReleaseTags(ctx context.Context, repo string, n int) ([]string, error)
-}
-
 // Deps is everything the flows use.
 type Deps struct {
 	Source  Source
 	Cluster Cluster
-	GitHub  Releases
 	Prompt  ui.Prompter
 	P       *ui.Printer
 	Out     io.Writer // plan, diff and verdict (data); status lines go through P
 	Repo    captain.Repo
-	Env     string // production | dev
-	Yes     bool   // --yes: confirmations answer yes
-	Paged   bool   // show the diff in the pager (stdout is a terminal)
+	Yes     bool // --yes: confirmations answer yes
+	Paged   bool // show the diff in the pager (stdout is a terminal)
 	// Chart overrides the chart reference (CRDS_CHART).
 	Chart string
 	// Wait bounds both waits (CRDS_WAIT_TIMEOUT).
@@ -58,8 +51,6 @@ type Deps struct {
 	GitInfo     func(dir string) string
 	PathPrefill string
 }
-
-func (d *Deps) production() bool { return d.Env != "dev" }
 
 func (d *Deps) chart() string {
 	if d.Chart != "" {
@@ -77,7 +68,7 @@ func (d *Deps) wait() time.Duration {
 
 // Options select the bundle without asking.
 type Options struct {
-	Version  string // a release tag; empty = the pin (production) or a chooser (dev apply)
+	Version  string // a release tag; empty = a chooser offering the pin (needs a terminal)
 	ChartDir string // a local platform-crds checkout
 	// RequireOwned (check): CRDs not yet owned by our field manager are drift, not just a note.
 	RequireOwned bool
@@ -88,22 +79,6 @@ func isDir(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// pinned is the platform_crds_version VERSIONS/glueops.yaml declares (exactly one).
-func (d *Deps) pinned() (string, error) {
-	pins, err := d.Repo.GlueOpsVersions()
-	if err != nil {
-		return "", fmt.Errorf("cannot read platform_crds_version from VERSIONS/glueops.yaml — run from the captain repo root, or pass --version: %w", err)
-	}
-	all := pins.All(captain.PlatformCRDsVersion)
-	if len(all) == 0 {
-		return "", fmt.Errorf("%s has no %s pin", pins.File, captain.PlatformCRDsVersion)
-	}
-	if len(all) > 1 {
-		return "", fmt.Errorf("%s has %d %s pins, want exactly one", pins.File, len(all), captain.PlatformCRDsVersion)
-	}
-	return all[0], nil
-}
-
 // fetch renders and validates the bundle for version (localVersion: from dir).
 func (d *Deps) fetch(ctx context.Context, version, dir string) (*bundle, error) {
 	ref, ver := d.chart(), strings.TrimPrefix(version, "v")
@@ -111,13 +86,8 @@ func (d *Deps) fetch(ctx context.Context, version, dir string) (*bundle, error) 
 		ref, ver = dir, ""
 	}
 	values := d.Repo.Path("platform.yaml")
-	switch {
-	case captain.Exists(values):
-	case d.production():
+	if !captain.Exists(values) {
 		return nil, fmt.Errorf("no platform.yaml in %s — the bundle reads it to pick the CRD profiles for this cluster; run from the captain repo root", d.Repo.Dir)
-	default:
-		d.P.Warn("no platform.yaml (dev): installing every profile")
-		values = ""
 	}
 	if dir == "" {
 		d.P.Note("bundle source: %s --version %s", ref, ver)
@@ -162,6 +132,7 @@ func (d *Deps) diff(ctx context.Context, b *bundle, live []*unstructured.Unstruc
 			return res, err
 		}
 		fmt.Fprintf(&text, "diff -u -N LIVE/%s MERGED/%s\n%s", name, name, u)
+		res.Names = append(res.Names, obj.GetName())
 		if cur == nil {
 			res.New++
 		} else {
@@ -250,35 +221,43 @@ func (d *Deps) clear(ctx context.Context, live []*unstructured.Unstructured) (cl
 
 // doApply is the only mutating Apply in this package, and it cannot run without
 // a clearance. It applies every CRD and reports all failures, as kubectl apply does.
-func (d *Deps) doApply(ctx context.Context, b *bundle, c clearance) error {
+func (d *Deps) doApply(ctx context.Context, b *bundle, c clearance) (failed []Failure) {
 	if !c.ok {
-		return errors.New("BUG: doApply called without a clearance")
+		return []Failure{{Error: "BUG: doApply called without a clearance"}}
 	}
 	d.P.Note("+ server-side apply of %d CRDs (force-conflicts, field manager %s)", b.total(), FieldManager)
-	var errs []error
 	for _, obj := range b.objs {
 		// what kubectl apply --server-side does first: hand client-side-apply ownership (and with
 		// it the last-applied annotation) over to our manager, so the apply below can drop them
 		if _, err := d.Cluster.MigrateCRDToSSA(ctx, obj.GetName(), FieldManager); err != nil {
-			errs = append(errs, err)
+			failed = append(failed, Failure{Name: obj.GetName(), Error: err.Error()})
 			continue
 		}
 		if _, err := d.Cluster.Apply(ctx, obj, kube.ApplyOptions{FieldManager: FieldManager, Force: true}); err != nil {
-			errs = append(errs, fmt.Errorf("apply %s: %w", obj.GetName(), err))
+			failed = append(failed, Failure{Name: obj.GetName(), Error: fmt.Sprintf("apply %s: %v", obj.GetName(), err)})
 		}
 	}
-	return errors.Join(errs...)
+	return failed
 }
 
-func (d *Deps) confirm(title string) (bool, error) {
+// confirm asks title; only the --yes flag answers for the operator. No (or Esc) is
+// ui.ErrDeclined, so a declined run is not mistaken for an applied one.
+func (d *Deps) confirm(title string) error {
 	if d.Yes {
 		d.P.Note("%s yes (--yes)", title)
-		return true, nil
+		return nil
 	}
 	if !d.Prompt.Interactive() {
-		return false, fmt.Errorf("%s: %w (pass --yes to run without one)", title, ui.ErrNoTerminal)
+		return fmt.Errorf("%s: %w (pass --yes to run without one)", title, ui.ErrNoTerminal)
 	}
-	return d.Prompt.Confirm(title)
+	ok, err := d.Prompt.Confirm(title)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ui.ErrDeclined
+	}
+	return nil
 }
 
 func (d *Deps) preflight(ctx context.Context, b *bundle) ([]*unstructured.Unstructured, error) {
@@ -312,8 +291,10 @@ func (t target) label() string {
 	return t.version
 }
 
-// resolveApply chooses what to apply. ok is false when the operator backed out.
-func (d *Deps) resolveApply(ctx context.Context, o Options) (t target, ok bool, err error) {
+// resolveApply chooses what to apply. Without a terminal the version is always explicit
+// (--version or --chart-dir): scripts define every version themselves, nothing falls back to
+// the pin. At a terminal a chooser offers the pin, custom and Back. ok is false on Back.
+func (d *Deps) resolveApply(o Options) (t target, ok bool, err error) {
 	if isDir(d.Chart) {
 		return t, false, fmt.Errorf("--chart '%s' is a directory — use --chart-dir", d.Chart)
 	}
@@ -322,22 +303,14 @@ func (d *Deps) resolveApply(ctx context.Context, o Options) (t target, ok bool, 
 		return d.localTarget(o.ChartDir, true)
 	case o.Version != "":
 		return target{version: o.Version}, true, validVersion(o.Version)
-	case d.production():
-		v, err := d.pinned()
-		if err != nil {
-			return t, false, err
-		}
-		return target{version: v}, true, validVersion(v)
+	case !d.Prompt.Interactive():
+		return t, false, errNeedVersion()
 	}
-	tags, err := d.GitHub.ReleaseTags(ctx, GitHubRepo, 10)
+	pin, err := d.Repo.PlatformCRDsPin()
 	if err != nil {
 		return t, false, err
 	}
-	// zero releases is fine: the chooser then offers just custom/Back
-	if !d.Prompt.Interactive() {
-		return t, false, fmt.Errorf("no terminal to choose on: %w (pass --version or --chart-dir)", ui.ErrNoTerminal)
-	}
-	choice, err := d.Prompt.Choose("platform-crds version", append(tags, "custom", ui.Back)...)
+	choice, err := d.Prompt.Choose("platform-crds version", pin, "custom", ui.Back)
 	if err != nil {
 		return t, false, err
 	}
@@ -345,9 +318,6 @@ func (d *Deps) resolveApply(ctx context.Context, o Options) (t target, ok bool, 
 	case ui.Back:
 		return t, false, nil
 	case "custom":
-		if !d.Prompt.Interactive() {
-			return t, false, fmt.Errorf("no terminal to ask for the checkout on: %w (pass --chart-dir)", ui.ErrNoTerminal)
-		}
 		dir, err := d.Prompt.Path("Local platform-crds checkout — rendered by hack/render.sh (Tab completes, empty = back):", d.PathPrefill)
 		if err != nil || dir == "" {
 			return t, false, err
@@ -355,6 +325,11 @@ func (d *Deps) resolveApply(ctx context.Context, o Options) (t target, ok bool, 
 		return d.localTarget(dir, true)
 	}
 	return target{version: choice}, true, validVersion(choice)
+}
+
+// errNeedVersion is the usage error of a run with no terminal and no --version / --chart-dir.
+func errNeedVersion() error {
+	return ui.Usage(fmt.Errorf("no terminal to choose on: %w (pass --version or --chart-dir)", ui.ErrNoTerminal))
 }
 
 func (d *Deps) localTarget(dir string, strict bool) (target, bool, error) {
@@ -375,41 +350,49 @@ func (d *Deps) localTarget(dir string, strict bool) (target, bool, error) {
 // Apply is the crds menu item: diff, confirm, re-read, strip ArgoCD tracking,
 // wait out terminating CRDs, server-side apply (always, also when the diff is
 // empty, so field ownership lands on our manager), wait Established, assert.
-// Declining is not an error.
+// A declined confirm is ui.ErrDeclined.
 func Apply(ctx context.Context, d *Deps, o Options) error {
-	t, ok, err := d.resolveApply(ctx, o)
+	_, err := ApplyResult(ctx, d, o)
+	return err
+}
+
+// ApplyResult is Apply plus what it did. The result is nil only when the run ended before a
+// bundle was chosen and read (Back, a usage error, a bundle that cannot be fetched); it
+// accompanies every later outcome, a failure included, so a partial apply says which CRDs failed.
+func ApplyResult(ctx context.Context, d *Deps, o Options) (*Result, error) {
+	t, ok, err := d.resolveApply(o)
 	if err != nil || !ok {
-		return err
+		return nil, err
 	}
 	v := t.label()
 	b, err := d.fetch(ctx, v, t.dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	res := newResult(v)
 	live, err := d.preflight(ctx, b) // on the pre-diff snapshot on purpose: it gates the diff the operator is shown
 	if err != nil {
-		return err
+		return res, err
 	}
 	df, err := d.diff(ctx, b, live)
 	if err != nil {
-		return fmt.Errorf("diff failed: %w", err)
+		return res, fmt.Errorf("diff failed: %w", err)
 	}
 	d.plan(v, b, live, df, true)
 	if df.drift() {
 		if d.Paged {
 			if err := d.Prompt.Pager(df.Text); err != nil {
-				return err
+				return res, err
 			}
 		} else {
 			fmt.Fprint(d.Out, df.Text)
 		}
-		ok, err := d.confirm("Apply platform-crds " + v + "?")
-		if err != nil {
-			return err
-		}
-		if !ok {
-			d.P.Info("Skipped platform-crds %s", v)
-			return nil
+		if err := d.confirm("Apply platform-crds " + v + "?"); err != nil {
+			if errors.Is(err, ui.ErrDeclined) {
+				d.P.Info("Skipped platform-crds %s", v)
+				res.settle(b.names, nil, df.Names) // nothing applied; only the ones already in sync are unchanged
+			}
+			return res, err
 		}
 	} else {
 		// Nothing differs, but a bundle CRD that is mid-deletion is NOT "in sync": it still has
@@ -419,17 +402,18 @@ func Apply(ctx context.Context, d *Deps, o Options) error {
 		ok := d.Yes
 		if !ok && d.Prompt.Interactive() {
 			if ok, err = d.Prompt.Confirm(reapplyPrompt(v, live, dying)); err != nil {
-				return err
+				return res, err
 			}
 		}
 		if !ok {
 			if len(dying) > 0 {
 				d.P.Error("not applied, and %d CRD(s) are still terminating: %s", len(dying), join(dying))
 				d.P.Plain("   the type disappears when deletion completes — re-run once it clears, or answer yes to wait and recreate it")
-				return errors.New("terminating CRDs not applied")
+				return res, errors.New("terminating CRDs not applied")
 			}
 			d.P.Info("✅ platform-crds %s — %s in sync, nothing applied", v, strings.Replace(b.scope(), " — profiles not enabled on this cluster are excluded", "", 1))
-			return nil
+			res.Unchanged = append(res.Unchanged, sortedCopy(b.names)...)
+			return res, nil
 		}
 	}
 	// What an apply leaves is deliberate: it creates what is missing and moves field ownership
@@ -443,31 +427,35 @@ func Apply(ctx context.Context, d *Deps, o Options) error {
 	// it so the terminating check sees the cluster as it is now.
 	pre, err := readLive(ctx, d.Cluster, b)
 	if err != nil {
-		return fmt.Errorf("cannot re-read CRDs after the confirm — nothing was applied: %w", err)
+		return res, fmt.Errorf("cannot re-read CRDs after the confirm — nothing was applied: %w", err)
 	}
 	c, err := d.clear(ctx, pre)
 	if err != nil {
-		return err
+		return res, err
 	}
-	if err := d.doApply(ctx, b, c); err != nil {
-		return fmt.Errorf("CRD apply failed: %w", err)
+	failed := d.doApply(ctx, b, c)
+	res.Failed = append(res.Failed, failed...)
+	res.settle(b.names, df.Names, failedNames(failed))
+	if len(failed) > 0 {
+		return res, fmt.Errorf("CRD apply failed (%d of %d): %s", len(failed), b.total(), failureText(failed))
 	}
 	if err := d.Cluster.WaitCRDsEstablished(ctx, sortedCopy(b.names), d.wait()); err != nil {
-		return fmt.Errorf("some CRDs did not become Established: %w", err)
+		return res, fmt.Errorf("some CRDs did not become Established: %w", err)
 	}
 	post, err := readLive(ctx, d.Cluster, b)
 	if err != nil {
-		return err
+		return res, err
 	}
 	if len(post) != b.total() {
-		return fmt.Errorf("expected %d bundle CRDs live after apply, found %d", b.total(), len(post))
+		return res, fmt.Errorf("expected %d bundle CRDs live after apply, found %d", b.total(), len(post))
 	}
 	// Established stays True on a CRD that is being deleted, so the wait above cannot see this
 	if dying := terminating(post); len(dying) > 0 {
-		return fmt.Errorf("the bundle WAS applied, but still terminating (the type is unusable until it clears): %s", join(dying))
+		return res, fmt.Errorf("the bundle WAS applied, but still terminating (the type is unusable until it clears): %s", join(dying))
 	}
+	res.Established = true
 	d.P.Info("✅ %d CRDs Established at platform-crds %s (applied as %s)", b.total(), v, FieldManager)
-	return nil
+	return res, nil
 }
 
 // reapplyPrompt says why a re-apply is worth it, from data already on hand.
@@ -501,9 +489,12 @@ func Check(ctx context.Context, d *Deps, o Options) error {
 		}
 	case o.Version != "":
 		t = target{version: o.Version}
+	case !d.Prompt.Interactive():
+		// like apply: scripts name the version they check, nothing falls back to the pin
+		return errNeedVersion()
 	default:
-		// Read directly: a dev chooser belongs to apply, not to a non-interactive check.
-		v, err := d.pinned()
+		// at a terminal the pin, read directly: no chooser, check is read-only
+		v, err := d.Repo.PlatformCRDsPin()
 		if err != nil {
 			return err
 		}

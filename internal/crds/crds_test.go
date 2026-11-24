@@ -172,10 +172,6 @@ func (f *fakeCluster) drifted(name string) {
 
 func (f *fakeCluster) mutations() []string { return f.calls }
 
-type fakeReleases struct{ tags []string }
-
-func (r fakeReleases) ReleaseTags(context.Context, string, int) ([]string, error) { return r.tags, nil }
-
 // noTTY is a prompter for a run without a terminal.
 type noTTY struct{ ui.Script }
 
@@ -193,7 +189,7 @@ type harness struct {
 
 const pins = "versions:\n  - name: platform_crds_version\n    version: v0.1.6\n"
 
-func newHarness(t *testing.T, env string, files map[string]string, tty bool, answers ...string) *harness {
+func newHarness(t *testing.T, files map[string]string, tty bool, answers ...string) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	if files == nil {
@@ -215,8 +211,8 @@ func newHarness(t *testing.T, env string, files map[string]string, tty bool, ans
 	} else {
 		h.prompt = &noTTY{Script: *h.script}
 	}
-	h.d = &Deps{Source: h.src, Cluster: h.cl, GitHub: fakeReleases{tags: []string{"v0.1.6", "v0.1.5"}}, Prompt: h.prompt,
-		P: ui.New(h.out, h.errs, true), Out: h.out, Repo: captain.Repo{Dir: dir}, Env: env, Wait: time.Second,
+	h.d = &Deps{Source: h.src, Cluster: h.cl, Prompt: h.prompt,
+		P: ui.New(h.out, h.errs, true), Out: h.out, Repo: captain.Repo{Dir: dir}, Wait: time.Second,
 		GitInfo: func(string) string { return "main@abc123" }}
 	return h
 }
@@ -228,8 +224,8 @@ func (h *harness) syncLive() {
 }
 
 func TestApplyAppliesAfterConfirm(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "yes")
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	h := newHarness(t, nil, true, "yes")
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	want := "apply a.x.io|apply b.x.io|wait established a.x.io,b.x.io"
@@ -245,32 +241,36 @@ func TestApplyAppliesAfterConfirm(t *testing.T) {
 }
 
 func TestApplyDeclinedChangesNothing(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "no")
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
-		t.Fatal(err)
+	h := newHarness(t, nil, true, "no")
+	res, err := ApplyResult(context.Background(), h.d, Options{Version: "v0.1.6"})
+	if !errors.Is(err, ui.ErrDeclined) {
+		t.Fatalf("a declined confirm must be ui.ErrDeclined (exit 3), got %v", err)
 	}
 	if len(h.cl.calls) != 0 || !strings.Contains(h.errs.String(), "Skipped platform-crds v0.1.6") {
 		t.Fatalf("%v %q", h.cl.calls, h.errs)
 	}
+	if res == nil || len(res.Applied) != 0 || len(res.Unchanged) != 0 || len(res.Failed) != 0 || res.Established {
+		t.Fatalf("a declined run applied nothing: %+v", res)
+	}
 }
 
 func TestApplyWithoutTerminalNeedsYes(t *testing.T) {
-	h := newHarness(t, "production", nil, false)
-	err := Apply(context.Background(), h.d, Options{})
+	h := newHarness(t, nil, false)
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if !errors.Is(err, ui.ErrNoTerminal) || len(h.cl.calls) != 0 {
 		t.Fatalf("%v %v", err, h.cl.calls)
 	}
-	h = newHarness(t, "production", nil, false)
+	h = newHarness(t, nil, false)
 	h.d.Yes = true
-	if err := Apply(context.Background(), h.d, Options{}); err != nil || len(h.cl.calls) != 3 {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil || len(h.cl.calls) != 3 {
 		t.Fatalf("%v %v", err, h.cl.calls)
 	}
 }
 
 func TestApplyInSyncWithoutTerminalIsQuietSuccess(t *testing.T) {
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.syncLive()
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.cl.calls) != 0 || !strings.Contains(h.errs.String(), "2 CRDs in sync, nothing applied") {
@@ -279,14 +279,14 @@ func TestApplyInSyncWithoutTerminalIsQuietSuccess(t *testing.T) {
 }
 
 func TestApplyInSyncOffersReapplyAndStripsArgoTracking(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.cl.put(h.src.manifest, func(o *unstructured.Unstructured) {
 		if o.GetName() == "a.x.io" {
 			o.SetAnnotations(map[string]string{argoTrackingID: "x"})
 			o.SetLabels(map[string]string{argoInstance: "y"})
 		}
 	})
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := h.script.Asked; len(got) != 0 {
@@ -303,25 +303,25 @@ func TestApplyInSyncOffersReapplyAndStripsArgoTracking(t *testing.T) {
 
 func TestApplyTerminatingNotInSyncWhenDeclinedFails(t *testing.T) {
 	// the Gate CRD case: a clean diff, but the type is about to disappear
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.cl.put(h.src.manifest, func(o *unstructured.Unstructured) {
 		if o.GetName() == "b.x.io" {
 			now := metav1.NewTime(time.Now())
 			o.SetDeletionTimestamp(&now)
 		}
 	})
-	err := Apply(context.Background(), h.d, Options{})
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if err == nil || len(h.cl.calls) != 0 || !strings.Contains(h.errs.String(), "still terminating: b.x.io") {
 		t.Fatalf("%v %v %q", err, h.cl.calls, h.errs)
 	}
 }
 
 func TestApplyWaitsOutTerminatingBeforeApplying(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.syncLive()
 	now := metav1.NewTime(time.Now())
 	h.cl.live["b.x.io"].SetDeletionTimestamp(&now)
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	want := "wait deleted b.x.io|apply a.x.io|apply b.x.io|wait established a.x.io,b.x.io"
@@ -331,12 +331,12 @@ func TestApplyWaitsOutTerminatingBeforeApplying(t *testing.T) {
 }
 
 func TestApplyTerminatingStillStuckAppliesNothing(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.syncLive()
 	now := metav1.NewTime(time.Now())
 	h.cl.live["b.x.io"].SetDeletionTimestamp(&now)
 	h.cl.delErr = &kube.TimeoutError{Timeout: time.Second, Pending: []string{"b.x.io"}}
-	err := Apply(context.Background(), h.d, Options{})
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if err == nil || err.Error() != "still terminating after 1s — the bundle was NOT applied: b.x.io" {
 		t.Fatalf("%v", err)
 	}
@@ -349,7 +349,7 @@ func TestApplyTerminatingStillStuckAppliesNothing(t *testing.T) {
 
 func TestApplyRereadsLiveAfterConfirm(t *testing.T) {
 	// a CRD that starts terminating while the operator reads the diff is still waited out
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.syncLive()
 	h.cl.drifted("a.x.io") // a diff, so the confirm happens
 	h.cl.afterList = func(f *fakeCluster, n int) {
@@ -358,7 +358,7 @@ func TestApplyRereadsLiveAfterConfirm(t *testing.T) {
 			f.live["b.x.io"].SetDeletionTimestamp(&now)
 		}
 	}
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	if h.cl.calls[0] != "wait deleted b.x.io" {
@@ -367,11 +367,11 @@ func TestApplyRereadsLiveAfterConfirm(t *testing.T) {
 }
 
 func TestApplyRefusesStorageVersionRemoval(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.cl.put(crdDoc("a.x.io", "v1beta1"), func(o *unstructured.Unstructured) {
 		_ = unstructured.SetNestedStringSlice(o.Object, []string{"v1beta1"}, "status", "storedVersions")
 	})
-	err := Apply(context.Background(), h.d, Options{})
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if err == nil || len(h.cl.calls) != 0 || !strings.Contains(h.errs.String(), "a.x.io stores v1beta1, which platform-crds no longer defines") {
 		t.Fatalf("%v %v %q", err, h.cl.calls, h.errs)
 	}
@@ -397,9 +397,9 @@ func TestBundleRefusals(t *testing.T) {
 		"should refuse a CRD file that merged into the previous one (no leading ---)": {"---\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: a.x.io\nspec: {}\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: b.x.io\nspec: {}\n", "does not parse as 2 separate CRD documents"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, "production", nil, true, "yes")
+			h := newHarness(t, nil, true, "yes")
 			h.src.manifest = tc.manifest
-			err := Apply(context.Background(), h.d, Options{})
+			err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 			if err == nil || !strings.Contains(err.Error(), tc.want) || len(h.cl.calls) != 0 {
 				t.Fatalf("%v %v", err, h.cl.calls)
 			}
@@ -408,27 +408,17 @@ func TestBundleRefusals(t *testing.T) {
 }
 
 func TestProductionNeedsPlatformYaml(t *testing.T) {
-	h := newHarness(t, "production", map[string]string{"VERSIONS/glueops.yaml": pins}, true)
-	err := Apply(context.Background(), h.d, Options{})
+	h := newHarness(t, map[string]string{"VERSIONS/glueops.yaml": pins}, true)
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if err == nil || !strings.Contains(err.Error(), "no platform.yaml") {
 		t.Fatalf("%v", err)
 	}
 }
 
-func TestDevWithoutPlatformYamlInstallsEveryProfile(t *testing.T) {
-	h := newHarness(t, "dev", map[string]string{}, true, "v0.1.6", "yes")
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(h.src.calls[0], "values=false") || !strings.Contains(h.errs.String(), "no platform.yaml (dev): installing every profile") {
-		t.Fatalf("%v %q", h.src.calls, h.errs)
-	}
-}
-
 func TestScopeSaysWhenProfilesExcludeCRDs(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "no")
+	h := newHarness(t, nil, true, "no")
 	h.src.union = 5
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); !errors.Is(err, ui.ErrDeclined) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(h.errs.String(), "2 of 5 CRDs — profiles not enabled on this cluster are excluded") {
@@ -438,7 +428,7 @@ func TestScopeSaysWhenProfilesExcludeCRDs(t *testing.T) {
 
 func TestVersionMustBeAReleaseTag(t *testing.T) {
 	for _, v := range []string{"main", "v1.2", "1.2.3-rc1"} {
-		h := newHarness(t, "production", nil, true)
+		h := newHarness(t, nil, true)
 		err := Apply(context.Background(), h.d, Options{Version: v})
 		if err == nil || !strings.Contains(err.Error(), "must be a release tag vX.Y.Z") || len(h.src.calls) != 0 {
 			t.Fatalf("%s: %v", v, err)
@@ -448,19 +438,58 @@ func TestVersionMustBeAReleaseTag(t *testing.T) {
 
 func TestDuplicatedPinIsRejected(t *testing.T) {
 	dup := pins + "  - name: platform_crds_version\n    version: v0.1.7\n"
-	h := newHarness(t, "production", map[string]string{"VERSIONS/glueops.yaml": dup, "platform.yaml": "a: 1\n"}, true)
+	h := newHarness(t, map[string]string{"VERSIONS/glueops.yaml": dup, "platform.yaml": "a: 1\n"}, true)
 	if err := Apply(context.Background(), h.d, Options{}); err == nil || !strings.Contains(err.Error(), "want exactly one") {
 		t.Fatalf("%v", err)
 	}
 }
 
-func TestDevChooserBack(t *testing.T) {
-	h := newHarness(t, "dev", nil, true, "Back")
+func TestChooserOffersPinCustomAndBack(t *testing.T) {
+	h := newHarness(t, nil, true, "Back")
 	if err := Apply(context.Background(), h.d, Options{}); err != nil || len(h.src.calls) != 0 {
 		t.Fatalf("%v %v", err, h.src.calls)
 	}
-	if got := h.script.Asked[0]; got != "CHOOSE platform-crds version [v0.1.6|v0.1.5|custom|Back]" {
+	if got := h.script.Asked[0]; got != "CHOOSE platform-crds version [v0.1.6|custom|Back]" {
 		t.Fatal(got)
+	}
+}
+
+func TestChooserAppliesTheChosenPin(t *testing.T) {
+	h := newHarness(t, nil, true, "v0.1.6", "yes")
+	if err := Apply(context.Background(), h.d, Options{}); err != nil || len(h.src.calls) != 1 {
+		t.Fatalf("%v %v", err, h.src.calls)
+	}
+}
+
+func TestChooserRefusesABranchLikePin(t *testing.T) {
+	branch := "versions:\n  - name: platform_crds_version\n    version: main\n"
+	h := newHarness(t, map[string]string{"VERSIONS/glueops.yaml": branch, "platform.yaml": "a: 1\n"}, true)
+	if err := Apply(context.Background(), h.d, Options{}); err == nil || !strings.Contains(err.Error(), "must be a release tag vX.Y.Z") || len(h.src.calls) != 0 {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestWithoutTerminalApplyAndCheckNeedAnExplicitVersion(t *testing.T) {
+	for name, run := range map[string]func(*harness) error{
+		"apply": func(h *harness) error { return Apply(context.Background(), h.d, Options{}) },
+		"check": func(h *harness) error { return Check(context.Background(), h.d, Options{}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil, false)
+			err := run(h)
+			if !errors.Is(err, ui.ErrUsage) || !strings.Contains(err.Error(), "pass --version or --chart-dir") {
+				t.Fatalf("%v", err)
+			}
+			if len(h.src.calls) != 0 || len(h.cl.calls) != 0 {
+				t.Fatalf("fetched or mutated: %v %v", h.src.calls, h.cl.calls)
+			}
+		})
+	}
+	// and with --version they run
+	h := newHarness(t, nil, false)
+	h.syncLive()
+	if err := Check(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -481,7 +510,7 @@ func localCheckout(t *testing.T, name string) string {
 }
 
 func TestApplyFromLocalCheckout(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	dir := localCheckout(t, "platform-crds")
 	if err := Apply(context.Background(), h.d, Options{ChartDir: dir}); err != nil {
 		t.Fatal(err)
@@ -503,7 +532,7 @@ func TestLocalCheckoutRefusals(t *testing.T) {
 		"should refuse a crds file without leading": {notSep, "must start with ---"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, "production", nil, true, "yes")
+			h := newHarness(t, nil, true, "yes")
 			err := Apply(context.Background(), h.d, Options{ChartDir: tc.dir})
 			if err == nil || !strings.Contains(err.Error(), tc.want) || len(h.cl.calls) != 0 {
 				t.Fatalf("%v", err)
@@ -513,20 +542,20 @@ func TestLocalCheckoutRefusals(t *testing.T) {
 }
 
 func TestChartOverrideThatIsADirectoryIsRefused(t *testing.T) {
-	h := newHarness(t, "production", nil, true)
+	h := newHarness(t, nil, true)
 	h.d.Chart = t.TempDir()
-	if err := Apply(context.Background(), h.d, Options{}); err == nil || !strings.Contains(err.Error(), "use --chart-dir") {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err == nil || !strings.Contains(err.Error(), "use --chart-dir") {
 		t.Fatalf("%v", err)
 	}
-	if err := Check(context.Background(), h.d, Options{}); err == nil || !strings.Contains(err.Error(), "use --chart-dir") {
+	if err := Check(context.Background(), h.d, Options{Version: "v0.1.6"}); err == nil || !strings.Contains(err.Error(), "use --chart-dir") {
 		t.Fatalf("%v", err)
 	}
 }
 
 func TestCheckInSyncReadsPinAndMutatesNothing(t *testing.T) {
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.syncLive()
-	if err := Check(context.Background(), h.d, Options{}); err != nil {
+	if err := Check(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.cl.mutations()) != 0 || !strings.Contains(h.errs.String(), "in sync with platform-crds v0.1.6") || !strings.Contains(h.out.String(), "own:    all 2 owned by glueops-platform-crds") {
@@ -535,7 +564,7 @@ func TestCheckInSyncReadsPinAndMutatesNothing(t *testing.T) {
 }
 
 func TestCheckDriftExitsWithErrDriftAndMutatesNothing(t *testing.T) {
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.cl.put(h.src.manifest, func(o *unstructured.Unstructured) {
 		if o.GetName() == "a.x.io" {
 			o.SetLabels(map[string]string{argoInstance: "y"}) // would be stripped by apply, not by check
@@ -543,7 +572,7 @@ func TestCheckDriftExitsWithErrDriftAndMutatesNothing(t *testing.T) {
 	})
 	h.cl.drifted("a.x.io")
 	h.cl.drifted("b.x.io")
-	err := Check(context.Background(), h.d, Options{})
+	err := Check(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if !errors.Is(err, ErrDrift) || len(h.cl.mutations()) != 0 {
 		t.Fatalf("%v %v", err, h.cl.calls)
 	}
@@ -552,16 +581,16 @@ func TestCheckDriftExitsWithErrDriftAndMutatesNothing(t *testing.T) {
 	}
 }
 
-func TestCheckFailsWithoutPinOrVersion(t *testing.T) {
-	h := newHarness(t, "production", map[string]string{"platform.yaml": "a: 1\n"}, false)
+func TestCheckAtATerminalFailsWithoutAPin(t *testing.T) {
+	h := newHarness(t, map[string]string{"platform.yaml": "a: 1\n"}, true)
 	err := Check(context.Background(), h.d, Options{})
-	if err == nil || errors.Is(err, ErrDrift) {
+	if err == nil || errors.Is(err, ErrDrift) || errors.Is(err, ui.ErrUsage) {
 		t.Fatalf("%v", err)
 	}
 }
 
 func TestCheckReportsCRDMissingFromClusterAsNew(t *testing.T) {
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	err := Check(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if !errors.Is(err, ErrDrift) || !strings.Contains(h.out.String(), "2 new, 0 changed") || !strings.Contains(h.out.String(), "own:    2 not yet owned by glueops-platform-crds: (2 not on the cluster yet)") {
 		t.Fatalf("%v %q", err, h.out)
@@ -569,10 +598,10 @@ func TestCheckReportsCRDMissingFromClusterAsNew(t *testing.T) {
 }
 
 func TestDiffShowsTheChange(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "no")
+	h := newHarness(t, nil, true, "no")
 	h.syncLive()
 	h.cl.drifted("a.x.io")
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); !errors.Is(err, ui.ErrDeclined) {
 		t.Fatal(err)
 	}
 	out := h.out.String()
@@ -630,7 +659,7 @@ func TestContractOneMutatingApplyAndNeverReplace(t *testing.T) {
 }
 
 func TestDoApplyRefusesWithoutClearance(t *testing.T) {
-	h := newHarness(t, "production", nil, true)
+	h := newHarness(t, nil, true)
 	b, err := parseBundle("v", &helmx.CRDBundle{Manifest: []byte(h.src.manifest)})
 	if err != nil {
 		t.Fatal(err)
@@ -643,8 +672,8 @@ func TestDoApplyRefusesWithoutClearance(t *testing.T) {
 func TestApplyMigratesClientSideApplyOwnershipBeforeEachApply(t *testing.T) {
 	// kubectl apply --server-side does this first; without it the last-applied annotation
 	// and the kubectl-client-side-apply manager stay on the CRD for good
-	h := newHarness(t, "production", nil, true, "yes")
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	h := newHarness(t, nil, true, "yes")
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	want := "migrate a.x.io|apply a.x.io|migrate b.x.io|apply b.x.io"
@@ -655,11 +684,11 @@ func TestApplyMigratesClientSideApplyOwnershipBeforeEachApply(t *testing.T) {
 
 func TestCheckTerminatingCRDIsDriftNotInSync(t *testing.T) {
 	// the diff of a CRD that is being deleted is clean, which is exactly why a clean diff cannot be the verdict
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.syncLive()
 	now := metav1.NewTime(time.Now())
 	h.cl.live["b.x.io"].SetDeletionTimestamp(&now)
-	err := Check(context.Background(), h.d, Options{})
+	err := Check(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if !errors.Is(err, ErrDrift) || len(h.cl.mutations()) != 0 || !strings.Contains(h.errs.String(), "drift: 1 CRD(s) are terminating and will disappear: b.x.io") || strings.Contains(h.errs.String(), "in sync") {
 		t.Fatalf("%v %v %q", err, h.cl.calls, h.errs)
 	}
@@ -673,10 +702,10 @@ func TestWaitIsPrintedInSecondsLikeTheBashCommand(t *testing.T) {
 
 func TestApplyKeepsGoingAfterOneCRDFailsAndReportsEveryFailure(t *testing.T) {
 	// as kubectl apply does: a bad CRD does not stop the others, and no failure is hidden
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.src.manifest = crdDoc("a.x.io") + crdDoc("b.x.io") + crdDoc("c.x.io")
 	h.cl.applyFail = map[string]error{"a.x.io": errors.New("webhook denied"), "c.x.io": errors.New("quota")}
-	err := Apply(context.Background(), h.d, Options{})
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if err == nil || !strings.Contains(err.Error(), "apply a.x.io: webhook denied") || !strings.Contains(err.Error(), "apply c.x.io: quota") {
 		t.Fatalf("%v", err)
 	}
@@ -686,22 +715,22 @@ func TestApplyKeepsGoingAfterOneCRDFailsAndReportsEveryFailure(t *testing.T) {
 }
 
 func TestApplyFailsWhenCRDsDoNotBecomeEstablished(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.cl.estErr = &kube.TimeoutError{Timeout: time.Second, Pending: []string{"b.x.io"}}
-	err := Apply(context.Background(), h.d, Options{})
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if err == nil || !strings.Contains(err.Error(), "some CRDs did not become Established") || !strings.Contains(err.Error(), "b.x.io") {
 		t.Fatalf("%v", err)
 	}
 }
 
 func TestApplyAssertsEveryBundleCRDIsLiveAfterwards(t *testing.T) {
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.cl.afterApply = func(f *fakeCluster, name string) {
 		if name == "b.x.io" {
 			delete(f.live, name) // gone again before the post-apply read
 		}
 	}
-	err := Apply(context.Background(), h.d, Options{})
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if err == nil || !strings.Contains(err.Error(), "expected 2 bundle CRDs live after apply, found 1") {
 		t.Fatalf("%v", err)
 	}
@@ -709,14 +738,14 @@ func TestApplyAssertsEveryBundleCRDIsLiveAfterwards(t *testing.T) {
 
 func TestApplyFailsWhenACRDStartsTerminatingDuringTheApply(t *testing.T) {
 	// Established stays True on a CRD being deleted, so only the post-apply read can see this
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.cl.afterApply = func(f *fakeCluster, name string) {
 		if name == "a.x.io" {
 			now := metav1.NewTime(time.Now())
 			f.live[name].SetDeletionTimestamp(&now)
 		}
 	}
-	err := Apply(context.Background(), h.d, Options{})
+	err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if err == nil || !strings.Contains(err.Error(), "the bundle WAS applied, but still terminating") || !strings.Contains(err.Error(), "a.x.io") {
 		t.Fatalf("%v", err)
 	}
@@ -724,9 +753,9 @@ func TestApplyFailsWhenACRDStartsTerminatingDuringTheApply(t *testing.T) {
 
 func TestCheckPrintsNoApplyOnlyPlanLines(t *testing.T) {
 	// regression: check reused the apply plan and said "strip", "the apply waits" and "after you confirm"
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.syncLive()
-	if err := Check(context.Background(), h.d, Options{}); err != nil {
+	if err := Check(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, apply := range []string{"strip:", "wait:", "keep:", "migrate:"} {
@@ -739,14 +768,14 @@ func TestCheckPrintsNoApplyOnlyPlanLines(t *testing.T) {
 func TestApplyPlanSaysClientSideApplyOwnershipMigrates(t *testing.T) {
 	// regression: the diff is empty for a client-side-applied CRD whose spec matches, yet apply drops
 	// last-applied-configuration; the plan must say so instead of only "no content changes"
-	h := newHarness(t, "production", nil, true, "yes")
+	h := newHarness(t, nil, true, "yes")
 	h.cl.put(h.src.manifest, func(o *unstructured.Unstructured) {
 		o.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: FieldManager, Operation: "Apply"}})
 		if o.GetName() == "a.x.io" {
 			o.SetAnnotations(map[string]string{"kubectl.kubernetes.io/last-applied-configuration": "{}"})
 		}
 	})
-	if err := Apply(context.Background(), h.d, Options{}); err != nil {
+	if err := Apply(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(h.out.String(), "no content changes") || !strings.Contains(h.out.String(), "migrate: client-side-apply ownership of 1 CRD(s)") {
@@ -757,19 +786,19 @@ func TestApplyPlanSaysClientSideApplyOwnershipMigrates(t *testing.T) {
 func TestCheckCRDThatIsNotEstablishedIsDriftNotInSync(t *testing.T) {
 	// regression (found on a k3d cluster): another CRD owning the same kind leaves NamesAccepted=False and
 	// Established=False; the diff is clean and the CRD is owned, yet apply fails on it, so check must not say "in sync"
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.syncLive()
 	_ = unstructured.SetNestedSlice(h.cl.live["b.x.io"].Object, []interface{}{
 		map[string]interface{}{"type": "Established", "status": "False", "reason": "NotAccepted"},
 	}, "status", "conditions")
-	err := Check(context.Background(), h.d, Options{})
+	err := Check(context.Background(), h.d, Options{Version: "v0.1.6"})
 	if !errors.Is(err, ErrDrift) || len(h.cl.mutations()) != 0 || !strings.Contains(h.errs.String(), "drift: 1 CRD(s) are not Established") || !strings.Contains(h.errs.String(), "same kind): b.x.io") || strings.Contains(h.errs.String(), "in sync") {
 		t.Fatalf("%v %v %q", err, h.cl.calls, h.errs)
 	}
 	// a CRD with no Established condition at all (just created) is not flagged
-	h = newHarness(t, "production", nil, false)
+	h = newHarness(t, nil, false)
 	h.syncLive()
-	if err := Check(context.Background(), h.d, Options{}); err != nil {
+	if err := Check(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -777,9 +806,9 @@ func TestCheckCRDThatIsNotEstablishedIsDriftNotInSync(t *testing.T) {
 func TestCheckInSyncButNotOwnedSaysSoAndExitsZeroByDefault(t *testing.T) {
 	// content matches, a manager other than ours owns the fields: apply calls this in sync too, so check
 	// exits 0, but "✅ in sync" directly under "N not yet owned" read as a contradiction
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.cl.put(h.src.manifest, nil) // live, same content, no managedFields
-	if err := Check(context.Background(), h.d, Options{}); err != nil {
+	if err := Check(context.Background(), h.d, Options{Version: "v0.1.6"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(h.errs.String(), "in sync with platform-crds v0.1.6 (content); 2 CRD(s) not yet owned by glueops-platform-crds — apply moves ownership") {
@@ -788,16 +817,69 @@ func TestCheckInSyncButNotOwnedSaysSoAndExitsZeroByDefault(t *testing.T) {
 }
 
 func TestCheckRequireOwnedFailsOnUnownedCRDs(t *testing.T) {
-	h := newHarness(t, "production", nil, false)
+	h := newHarness(t, nil, false)
 	h.cl.put(h.src.manifest, nil)
-	err := Check(context.Background(), h.d, Options{RequireOwned: true})
+	err := Check(context.Background(), h.d, Options{Version: "v0.1.6", RequireOwned: true})
 	if !errors.Is(err, ErrDrift) || len(h.cl.mutations()) != 0 || !strings.Contains(h.errs.String(), "drift: 2 CRD(s) are not owned by glueops-platform-crds") {
 		t.Fatalf("%v %q", err, h.errs)
 	}
 	// owned: passes
-	h = newHarness(t, "production", nil, false)
+	h = newHarness(t, nil, false)
 	h.syncLive()
-	if err := Check(context.Background(), h.d, Options{RequireOwned: true}); err != nil {
+	if err := Check(context.Background(), h.d, Options{Version: "v0.1.6", RequireOwned: true}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApplyResultNamesWhatWasApplied(t *testing.T) {
+	h := newHarness(t, nil, true, "yes")
+	res, err := ApplyResult(context.Background(), h.d, Options{Version: "v0.1.6"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Version != "v0.1.6" || !res.Established || strings.Join(res.Applied, ",") != "a.x.io,b.x.io" || len(res.Unchanged) != 0 || len(res.Failed) != 0 {
+		t.Fatalf("%+v", res)
+	}
+	if got := res.Summary(); got != "applied=2 unchanged=0 failed=0" {
+		t.Fatal(got)
+	}
+}
+
+func TestApplyResultSplitsAppliedFromUnchanged(t *testing.T) {
+	h := newHarness(t, nil, true, "yes")
+	h.syncLive()
+	h.cl.drifted("a.x.io")
+	res, err := ApplyResult(context.Background(), h.d, Options{Version: "v0.1.6"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(res.Applied, ",") != "a.x.io" || strings.Join(res.Unchanged, ",") != "b.x.io" {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestPartialApplyFailureNamesTheFailedCRD(t *testing.T) {
+	h := newHarness(t, nil, true, "yes")
+	h.cl.applyFail = map[string]error{"b.x.io": errors.New("webhook denied")}
+	res, err := ApplyResult(context.Background(), h.d, Options{Version: "v0.1.6"})
+	if err == nil || errors.Is(err, ui.ErrDeclined) || errors.Is(err, ui.ErrUsage) {
+		t.Fatalf("a partial failure is a plain failure (exit 1): %v", err)
+	}
+	if len(res.Failed) != 1 || res.Failed[0].Name != "b.x.io" || !strings.Contains(res.Failed[0].Error, "webhook denied") ||
+		strings.Join(res.Applied, ",") != "a.x.io" || res.Established {
+		t.Fatalf("%+v", res)
+	}
+	var buf bytes.Buffer
+	if err := res.WriteJSON(&buf); err != nil || !strings.Contains(buf.String(), `"failed": [`) || !strings.Contains(buf.String(), `"name": "b.x.io"`) {
+		t.Fatalf("%v %s", err, buf.String())
+	}
+}
+
+func TestApplyInSyncResultIsAllUnchanged(t *testing.T) {
+	h := newHarness(t, nil, false)
+	h.syncLive()
+	res, err := ApplyResult(context.Background(), h.d, Options{Version: "v0.1.6"})
+	if err != nil || strings.Join(res.Unchanged, ",") != "a.x.io,b.x.io" || len(res.Applied) != 0 {
+		t.Fatalf("%v %+v", err, res)
 	}
 }

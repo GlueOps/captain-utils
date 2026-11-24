@@ -122,15 +122,23 @@ var releaseTag = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+$`)
 // IsReleaseTag reports whether s looks like vX.Y.Z (or X.Y.Z).
 func IsReleaseTag(s string) bool { return releaseTag.MatchString(s) }
 
-// CRDsBundleEnabled reports whether the cluster is on the platform-crds
-// bundle: exactly one release-tag-shaped platform_crds_version pin.
-func (r Repo) CRDsBundleEnabled() bool {
-	v, err := r.GlueOpsVersions()
+// PlatformCRDsPin is the platform_crds_version VERSIONS/glueops.yaml declares: exactly one pin,
+// shaped like a release tag. A missing, duplicated or branch-like pin is an error.
+func (r Repo) PlatformCRDsPin() (string, error) {
+	pins, err := r.GlueOpsVersions()
 	if err != nil {
-		return false
+		return "", fmt.Errorf("cannot read platform_crds_version from VERSIONS/glueops.yaml — run from the captain repo root, or pass --version: %w", err)
 	}
-	pins := v.All(PlatformCRDsVersion)
-	return len(pins) == 1 && IsReleaseTag(pins[0])
+	all := pins.All(PlatformCRDsVersion)
+	switch {
+	case len(all) == 0:
+		return "", fmt.Errorf("%s has no %s pin", pins.File, PlatformCRDsVersion)
+	case len(all) > 1:
+		return "", fmt.Errorf("%s has %d %s pins, want exactly one", pins.File, len(all), PlatformCRDsVersion)
+	case !IsReleaseTag(all[0]):
+		return "", fmt.Errorf("%s: %s must be a release tag vX.Y.Z (got '%s')", pins.File, PlatformCRDsVersion, all[0])
+	}
+	return all[0], nil
 }
 
 // Exists reports whether path exists (errors other than not-exist count as existing).

@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"errors"
-	"os"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -24,13 +24,11 @@ func (a *App) crdsDeps() (*crds.Deps, error) {
 	return &crds.Deps{
 		Source:      a.NewCRDSource(o.KubeContext),
 		Cluster:     cl,
-		GitHub:      a.NewGitHub(),
 		Prompt:      a.Prompt,
 		P:           a.p,
 		Out:         a.Out,
 		Repo:        a.repo(),
-		Env:         o.Env,
-		Yes:         o.Yes || os.Getenv("CRDS_AUTO_CONFIRM") == "yes",
+		Yes:         o.Yes,
 		Paged:       ui.IsTerminal(a.Out),
 		Chart:       a.v.GetString("crds-chart"),
 		Wait:        waitTimeout(a.v.GetString("crds-wait-timeout")),
@@ -57,9 +55,14 @@ func (a *App) crdsCmd() *cobra.Command {
 		Long: `The GlueOps layer-0 CRD bundle (GlueOps/platform-crds): diff, confirm,
 server-side apply.
 
-Which CRDs a cluster installs is selected from ./platform.yaml (production
-requires it; dev without one installs every profile). Run it before and after
-the argocd step.
+Which CRDs a cluster installs is selected from ./platform.yaml (required). Run it
+before and after the argocd step.
+
+Without a terminal, --version or --chart-dir is required; at a terminal, apply asks
+(the VERSIONS/glueops.yaml pin, custom, or Back) and check uses the pin.
+
+Exit codes: 0 done or nothing to do, 1 failed (apply: including partial; check:
+drift), 2 usage error (check: any failure), 3 apply declined.
 
 CRDs are only ever server-side applied (force-conflicts, field manager
 glueops-platform-crds), never replaced: replace erases metadata.finalizers and
@@ -76,14 +79,14 @@ orphans the custom resources of a terminating CRD.`,
 	var o crds.Options
 	var requireOwned bool
 	add := func(cmd *cobra.Command) *cobra.Command {
-		cmd.Flags().StringVar(&o.Version, "version", "", "bundle release tag vX.Y.Z (default: the VERSIONS/glueops.yaml pin; dev apply: a chooser)")
+		cmd.Flags().StringVar(&o.Version, "version", "", "bundle release tag vX.Y.Z (required without a terminal; at a terminal apply offers the pin in a chooser, check uses it)")
 		cmd.Flags().StringVar(&o.ChartDir, "chart-dir", "", "a local platform-crds checkout rendered by hack/render.sh (custom)")
 		cmd.MarkFlagsMutuallyExclusive("version", "chart-dir")
 		return cmd
 	}
 	checkCmd := &cobra.Command{
 		Use:   "check",
-		Short: "Read-only: is the cluster in sync with the bundle? (exit 0 in sync, 1 drift, 2 failure)",
+		Short: "Read-only: is the cluster in sync with the bundle? (exit 0 in sync, 1 drift, 2 failure or usage error)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			d, err := a.crdsDeps()
@@ -101,17 +104,43 @@ orphans the custom resources of a terminating CRD.`,
 		},
 	}
 	checkCmd.Flags().BoolVar(&requireOwned, "require-owned", false, "also exit 1 when a CRD is not yet owned by the glueops-platform-crds field manager (default: a note; apply moves ownership)")
-	c.AddCommand(add(checkCmd), add(&cobra.Command{
+	var output string
+	applyCmd := add(&cobra.Command{
 		Use:   "apply",
 		Short: "Diff, confirm, strip ArgoCD tracking, server-side apply, wait Established",
-		Args:  cobra.NoArgs,
+		Long: `Diff, confirm, strip ArgoCD tracking, server-side apply, wait Established.
+
+It ends with one result on stdout: "applied=N unchanged=N failed=N" (plus a line per
+failed CRD), or with -o json {version, applied, unchanged, failed: [{name, error}],
+established}. With -o json the plan and diff go to stderr, so stdout is only the JSON.
+A declined confirm exits 3; a partial failure exits 1 with the failed CRDs in the result.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if output != "text" && output != "json" {
+				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", output)}
+			}
 			d, err := a.crdsDeps()
 			if err != nil {
 				return err
 			}
-			return crds.Apply(cmd.Context(), d, o)
+			if output == "json" {
+				d.Out = a.Err
+				d.Paged = false
+			}
+			res, err := crds.ApplyResult(cmd.Context(), d, o)
+			if res != nil && !errors.Is(err, ui.ErrUsage) {
+				if output == "json" {
+					if jerr := res.WriteJSON(a.Out); jerr != nil && err == nil {
+						err = jerr
+					}
+				} else {
+					res.WriteText(a.Out)
+				}
+			}
+			return err
 		},
-	}))
+	})
+	applyCmd.Flags().StringVarP(&output, "output", "o", "text", "result format: text or json")
+	c.AddCommand(add(checkCmd), applyCmd)
 	return c
 }

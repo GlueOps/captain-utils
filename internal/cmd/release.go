@@ -33,15 +33,12 @@ func (a *App) deps(diffOnly bool) (*upgrade.Deps, error) {
 	return &upgrade.Deps{
 		Helm:        a.NewHelm(o.KubeContext),
 		Kube:        cl,
-		GitHub:      a.NewGitHub(),
 		Prompt:      a.Prompt,
 		P:           a.p,
 		Repo:        a.repo(),
-		Env:         o.Env,
 		Yes:         o.Yes,
 		Color:       colorOn,
 		GitInfo:     gitinfo.Describe,
-		Fetch:       upgrade.HTTPFetch,
 		PathPrefill: prefill,
 	}, nil
 }
@@ -54,14 +51,14 @@ func (a *App) platformCmd() *cobra.Command {
 with -f platform.yaml -f overrides.yaml (platform.yaml twice when there is no
 overrides.yaml).
 
-Production installs the VERSIONS/glueops.yaml pin; dev chooses from the last
-10 GitHub releases. --chart-dir installs a local checkout of
-GlueOps/platform-helm-chart-platform instead ("custom"), recorded in the
+At a terminal a chooser offers the VERSIONS/glueops.yaml pin (or custom, or Back);
+without one, --version or --chart-dir is required. --chart-dir installs a local
+checkout of GlueOps/platform-helm-chart-platform instead ("custom"), recorded in the
 release description.`,
 	}
 	var o upgrade.PlatformOptions
 	add := func(cmd *cobra.Command) *cobra.Command {
-		cmd.Flags().StringVar(&o.Version, "version", "", "chart version (default: the pin in production, a chooser in dev)")
+		cmd.Flags().StringVar(&o.Version, "version", "", "chart version (required without a terminal; at a terminal a chooser offers the pin)")
 		cmd.Flags().StringVar(&o.ChartDir, "chart-dir", "", "install from this local chart directory (custom)")
 		cmd.MarkFlagsMutuallyExclusive("version", "chart-dir")
 		return cmd
@@ -100,17 +97,12 @@ func (a *App) argocdCmd() *cobra.Command {
 		Long: `The argocd release (menu item argocd): argo/argo-cd in glueops-core with -f
 argocd.yaml and --skip-crds.
 
-On a captain that pins platform_crds_version, ArgoCD's CRDs come from the
-platform-crds bundle: run crds before and after this step. Other captains keep
-the legacy install of ArgoCD's own CRDs (--crd-version, or a chooser) before
-the upgrade.`,
+ArgoCD's CRDs come from the platform-crds bundle, not from this step: run crds
+before and after it. Without a terminal, --version is required.`,
 	}
 	var o upgrade.ArgocdOptions
 	add := func(cmd *cobra.Command) *cobra.Command {
-		cmd.Flags().StringVar(&o.Version, "version", "", "argo-cd chart version (default: the pin in production, a chooser in dev)")
-		cmd.Flags().StringVar(&o.CRDVersion, "crd-version", "", "legacy path: apply ArgoCD's CRDs at this app version first")
-		cmd.Flags().BoolVar(&o.SkipCRDInstall, "skip-crds-install", false, "legacy path: apply no CRDs")
-		cmd.MarkFlagsMutuallyExclusive("crd-version", "skip-crds-install")
+		cmd.Flags().StringVar(&o.Version, "version", "", "argo-cd chart version (required without a terminal; at a terminal a chooser offers the pin)")
 		return cmd
 	}
 	c.AddCommand(add(&cobra.Command{
@@ -127,7 +119,7 @@ the upgrade.`,
 		},
 	}), add(&cobra.Command{
 		Use:   "upgrade",
-		Short: "Diff, confirm, (legacy CRDs,) helm upgrade --install",
+		Short: "Diff, confirm, helm upgrade --install",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			d, err := a.deps(false)
@@ -144,7 +136,7 @@ func (a *App) calicoCmd() *cobra.Command {
 	c := &cobra.Command{Use: "calico", Short: "Calico on EKS (menu: aws → calico)"}
 	c.AddCommand(&cobra.Command{
 		Use:   "upgrade",
-		Short: "Delete the aws-node daemonset and helm upgrade --install calico at the pin",
+		Short: "Diff, confirm, delete the aws-node daemonset and helm upgrade --install calico at the pin",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			d, err := a.deps(false)

@@ -133,6 +133,7 @@ func storedVersions(b *bundle, live []*unstructured.Unstructured) (errs, warns [
 // diffResult is what an apply would change.
 type diffResult struct {
 	New, Changed int
+	Names        []string // the CRDs that are new or changed
 	Text         string
 }
 

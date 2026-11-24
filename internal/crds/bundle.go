@@ -37,11 +37,8 @@ import (
 const (
 	FieldManager = "glueops-platform-crds"
 	// DefaultChart mirrors ghcr.io/glueops/platform-crds.
-	DefaultChart = "oci://ghcr.repo.gpkg.io/glueops/platform-crds"
-	DefaultWait  = 120 * time.Second
-	// GitHubRepo is where dev mode lists releases.
-	GitHubRepo = "GlueOps/platform-crds"
-
+	DefaultChart   = "oci://ghcr.repo.gpkg.io/glueops/platform-crds"
+	DefaultWait    = 120 * time.Second
 	crdKind        = "CustomResourceDefinition"
 	argoTrackingID = "argocd.argoproj.io/tracking-id"
 	argoInstance   = "argocd.argoproj.io/instance"

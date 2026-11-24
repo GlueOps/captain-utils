@@ -19,6 +19,23 @@ import (
 // ErrNoTerminal is returned by a prompt that has no terminal to ask on.
 var ErrNoTerminal = errors.New("no terminal to ask on")
 
+// ErrUsage marks a command line the flows cannot act on (a version that must be given
+// without a terminal, say). The CLI exits 2 for it, like any other usage error.
+var ErrUsage = errors.New("usage error")
+
+type usageError struct{ err error }
+
+func (u usageError) Error() string        { return u.err.Error() }
+func (u usageError) Unwrap() error        { return u.err }
+func (u usageError) Is(target error) bool { return target == ErrUsage }
+
+// Usage marks err as a usage error (errors.Is(err, ErrUsage)) without changing its text.
+func Usage(err error) error { return usageError{err} }
+
+// ErrDeclined is returned by a flow whose confirmation was answered no. The CLI exits 3 for
+// it, so "applied" and "skipped" differ for a script; the menu treats it as skipped.
+var ErrDeclined = errors.New("declined")
+
 // Back is what Choose returns when the operator backs out (Esc / Ctrl-C), and
 // the option the menus offer for it.
 const Back = "Back"

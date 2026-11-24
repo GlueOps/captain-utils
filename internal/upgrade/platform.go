@@ -19,12 +19,11 @@ const (
 	PlatformNamespace = "glueops-core"
 	PlatformChart     = "glueops-platform/glueops-platform"
 	PlatformRepo      = "glueops-platform"
-	PlatformGitHub    = "GlueOps/platform-helm-chart-platform"
 )
 
 // PlatformOptions select what the flow does without asking.
 type PlatformOptions struct {
-	Version  string // chart version; empty = the pin (production) or a chooser
+	Version  string // chart version; empty = a chooser offering the pin (needs a terminal)
 	ChartDir string // "custom": a local chart directory instead of a version
 	DiffOnly bool   // stop after the diff (print it, change nothing)
 }
@@ -43,28 +42,20 @@ func Platform(ctx context.Context, d *Deps, o PlatformOptions, out io.Writer) er
 		return platformCustom(ctx, d, o.ChartDir, overrides, o.DiffOnly, out)
 	}
 
-	var versions []string
-	if d.Production() {
+	version := o.Version
+	if version == "" {
+		if !d.Prompt.Interactive() {
+			return errNeedFlag("choose", "--version or --chart-dir")
+		}
 		pins, err := d.Repo.GlueOpsVersions()
 		if err != nil {
 			return err
 		}
-		v, err := pins.Require(captain.PlatformChartVersion)
+		pin, err := pins.Require(captain.PlatformChartVersion)
 		if err != nil {
 			return err
 		}
-		versions = []string{v}
-	} else if o.Version == "" {
-		tags, err := d.GitHub.ReleaseTags(ctx, PlatformGitHub, 10)
-		if err != nil {
-			return err
-		}
-		versions = tags
-	}
-
-	version := o.Version
-	if version == "" {
-		choice, err := d.choose("glueops-platform version", "--version or --chart-dir", append(versions, "custom", "Back")...)
+		choice, err := d.choose("glueops-platform version", "--version or --chart-dir", pin, "custom", "Back")
 		if err != nil {
 			return err
 		}
@@ -92,7 +83,7 @@ func Platform(ctx context.Context, d *Deps, o PlatformOptions, out io.Writer) er
 	if o.DiffOnly {
 		return nil
 	}
-	if ok, err := d.confirm("Apply upgrade"); err != nil || !ok {
+	if err := d.confirm("Apply upgrade"); err != nil {
 		return err
 	}
 	return d.upgrade(ctx, r, out)
@@ -102,12 +93,10 @@ func Platform(ctx context.Context, d *Deps, o PlatformOptions, out io.Writer) er
 // with --description "custom: <dir> (<branch>@<sha>[, dirty])" so helm history
 // shows what is really installed. Refusals are errors; declining is not.
 func platformCustom(ctx context.Context, d *Deps, dir, overrides string, diffOnly bool, out io.Writer) error {
-	if d.Production() {
-		d.P.Alert("⚠️  custom installs an UNRELEASED chart on this cluster. The VERSIONS/glueops.yaml pin will no longer describe what is running, and show_diff_table will usually NOT show it (feature branches keep main's Chart.yaml version) — 'helm history %s -n %s' is the only record. Re-run glueops-platform with the pinned version to get back.", PlatformRelease, PlatformNamespace)
-	}
+	d.P.Alert("⚠️  custom installs an UNRELEASED chart on this cluster. The VERSIONS/glueops.yaml pin will no longer describe what is running, and show_diff_table will usually NOT show it (feature branches keep main's Chart.yaml version) — 'helm history %s -n %s' is the only record. Re-run glueops-platform with the pinned version to get back.", PlatformRelease, PlatformNamespace)
 	if dir == "" {
 		if !d.Prompt.Interactive() {
-			return fmt.Errorf("%w (pass --chart-dir)", errNoTTY("ask for the chart directory"))
+			return errNeedFlag("ask for the chart directory", "--chart-dir")
 		}
 		var err error
 		dir, err = d.Prompt.Path("Local chart directory — a checkout of GlueOps/platform-helm-chart-platform (Tab completes, empty = back):", d.PathPrefill)
@@ -146,7 +135,7 @@ func platformCustom(ctx context.Context, d *Deps, dir, overrides string, diffOnl
 	}
 	d.P.Plain("helm list will show %s-%s; the directory is recorded only in the release description: custom: %s", PlatformRelease, meta.Version, src)
 	if !diffOnly {
-		if ok, err := d.confirm("Diff this chart against the cluster?"); err != nil || !ok {
+		if err := d.confirm("Diff this chart against the cluster?"); err != nil {
 			return err
 		}
 	}
@@ -162,7 +151,7 @@ func platformCustom(ctx context.Context, d *Deps, dir, overrides string, diffOnl
 	if diffOnly {
 		return nil
 	}
-	if ok, err := d.confirm("Apply upgrade"); err != nil || !ok {
+	if err := d.confirm("Apply upgrade"); err != nil {
 		return err
 	}
 	if err := d.upgrade(ctx, r, out); err != nil {

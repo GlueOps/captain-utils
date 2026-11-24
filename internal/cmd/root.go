@@ -19,7 +19,6 @@ import (
 
 	"github.com/glueops/captain-utils/internal/captain"
 	"github.com/glueops/captain-utils/internal/crds"
-	"github.com/glueops/captain-utils/internal/github"
 	"github.com/glueops/captain-utils/internal/helmx"
 	"github.com/glueops/captain-utils/internal/kube"
 	"github.com/glueops/captain-utils/internal/ui"
@@ -27,10 +26,10 @@ import (
 	"github.com/glueops/captain-utils/internal/versions"
 )
 
-// Environments.
+// Exit codes. 0 is done (or nothing to do) and 1 a failure; crds check uses 1 for drift.
 const (
-	EnvProduction = "production"
-	EnvDev        = "dev"
+	ExitUsage    = 2 // a command line that cannot run
+	ExitDeclined = 3 // a confirmation was answered no: nothing was changed
 )
 
 // ExitError carries a specific exit code. Its message, if any, has already
@@ -64,17 +63,20 @@ type App struct {
 	Out, Err        io.Writer
 	NewCluster      func(kubeContext string) (Cluster, error)
 	NewHelm         func(kubeContext string) upgrade.Helm
-	NewGitHub       func() upgrade.Releases
 	NewCRDSource    func(kubeContext string) crds.Source
 	Prompt          ui.Prompter
 
 	v *viper.Viper
 	p *ui.Printer
+	// yes is --yes, read from the flag alone: an exported environment variable outlives the
+	// command it was set for, so only the explicit flag approves a confirmation.
+	yes bool
+	// running is set once a command's RunE has started: an error before that is a usage error.
+	running bool
 }
 
 // Options are the resolved global settings (flag > env > default).
 type Options struct {
-	Env         string
 	CaptainDir  string
 	KubeContext string
 	Yes         bool
@@ -83,10 +85,9 @@ type Options struct {
 
 func (a *App) opts() Options {
 	return Options{
-		Env:         a.v.GetString("env"),
 		CaptainDir:  a.v.GetString("captain-dir"),
 		KubeContext: a.v.GetString("kube-context"),
-		Yes:         a.v.GetBool("yes"),
+		Yes:         a.yes,
 		NoColor:     a.v.GetBool("no-color"),
 	}
 }
@@ -108,7 +109,6 @@ func NewApp(version, commit string, out, errw io.Writer) *App {
 		return kube.New(kubeContext, "captain-utils/"+version)
 	}
 	a.NewHelm = func(kubeContext string) upgrade.Helm { return helmx.New(kubeContext, errw) }
-	a.NewGitHub = func() upgrade.Releases { return github.New() }
 	a.NewCRDSource = func(kubeContext string) crds.Source { return helmx.New(kubeContext, errw) }
 	a.Prompt = ui.NewTTY()
 	return a
@@ -130,11 +130,7 @@ captain_utils with no arguments) is the menu itself.`,
 		SilenceErrors: true,
 		Version:       a.Version,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			o := a.opts()
-			a.p = ui.New(a.Out, a.Err, o.NoColor)
-			if o.Env != EnvProduction && o.Env != EnvDev {
-				return fmt.Errorf("--env must be %s or %s, got %q", EnvProduction, EnvDev, o.Env)
-			}
+			a.p = ui.New(a.Out, a.Err, a.opts().NoColor)
 			return nil
 		},
 	}
@@ -143,23 +139,26 @@ captain_utils with no arguments) is the menu itself.`,
 	root.SetVersionTemplate(fmt.Sprintf("captain-utils %s (%s)\n", a.Version, a.Commit))
 
 	pf := root.PersistentFlags()
-	pf.String("env", EnvProduction, "production (pins from VERSIONS/*.yaml) or dev; env: environment")
 	pf.String("captain-dir", ".", "captain repo root; env: CAPTAIN_UTILS_CAPTAIN_DIR")
 	pf.String("kube-context", "", "kube context (default: the current context); env: CAPTAIN_UTILS_KUBE_CONTEXT")
-	pf.BoolP("yes", "y", false, "answer yes to confirmations (needed to change the cluster without a terminal); env: CAPTAIN_UTILS_YES")
+	pf.BoolVarP(&a.yes, "yes", "y", false, "answer yes to confirmations (needed to change the cluster without a terminal); no environment variable sets it")
 	pf.Bool("no-color", false, "no colour (also off when output is not a terminal, or NO_COLOR is set)")
-	_ = a.v.BindPFlags(pf)
+	for _, name := range []string{"captain-dir", "kube-context", "no-color"} {
+		_ = a.v.BindPFlag(name, pf.Lookup(name))
+	}
 	a.v.SetEnvPrefix("CAPTAIN_UTILS")
 	a.v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	a.v.AutomaticEnv()
-	// the name the bash menu and the crds command have always used
-	_ = a.v.BindEnv("env", "environment", "CAPTAIN_UTILS_ENV")
 	// where the "custom" directory prompt starts, as in the bash menu
 	a.v.SetDefault("platform-chart-dir-prefill", "/workspaces/")
 	_ = a.v.BindEnv("platform-chart-dir-prefill", "PLATFORM_CHART_DIR_PREFILL")
 
 	root.AddCommand(a.versionCmd(), a.versionsCmd(), a.awsCmd(), a.platformCmd(), a.argocdCmd(), a.crdsCmd(), a.podsCmd(), a.menuCmd())
 	rejectUnknownSubcommands(root)
+	// every error cobra raises before a command runs (unknown flag or command, a bad flag value,
+	// exclusive flags, wrong arguments) is a usage error: exit 2, never a command's own code
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return &ExitError{Code: ExitUsage, Err: err} })
+	a.markRunning(root)
 	return root
 }
 
@@ -194,8 +193,27 @@ func (a *App) Execute(ctx context.Context, args []string) int {
 		}
 		return ee.Code
 	}
+	if errors.Is(err, ui.ErrDeclined) {
+		return ExitDeclined
+	}
 	a.printer().Error("%v", err)
+	if errors.Is(err, ui.ErrUsage) || !a.running {
+		return ExitUsage
+	}
 	return 1
+}
+
+// markRunning wraps every command's RunE to record that the command line was accepted.
+func (a *App) markRunning(c *cobra.Command) {
+	if run := c.RunE; run != nil {
+		c.RunE = func(cmd *cobra.Command, args []string) error {
+			a.running = true
+			return run(cmd, args)
+		}
+	}
+	for _, sub := range c.Commands() {
+		a.markRunning(sub)
+	}
 }
 
 // printer is usable even when PersistentPreRunE did not run (flag errors).
@@ -225,7 +243,7 @@ func rejectUnknownSubcommands(c *cobra.Command) {
 		if sub.HasSubCommands() && sub.Run == nil && sub.RunE == nil {
 			sub.RunE = func(cmd *cobra.Command, args []string) error {
 				if len(args) > 0 {
-					return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+					return &ExitError{Code: ExitUsage, Err: fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())}
 				}
 				return cmd.Help()
 			}

@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/databus23/helm-diff/v3/diff"
 	"github.com/databus23/helm-diff/v3/manifest"
 	"github.com/mgutz/ansi"
@@ -197,36 +196,6 @@ func (c *Client) RepoAdd(name, url string) error {
 	}
 	fmt.Fprintf(c.Log, "%q has been added to your repositories\n", name)
 	return nil
-}
-
-// ChartVersion is one index entry.
-type ChartVersion struct {
-	Version    string
-	AppVersion string
-}
-
-// SearchVersions lists the newest max stable versions of repoName/chartName
-// from the cached index, like `helm search repo repo/chart --versions`.
-func (c *Client) SearchVersions(repoName, chartName string, max int) ([]ChartVersion, error) {
-	idx, err := repo.LoadIndexFile(fmt.Sprintf("%s/%s-index.yaml", c.Settings.RepositoryCache, repoName))
-	if err != nil {
-		return nil, fmt.Errorf("helm repository %q index: %w (run a repo update)", repoName, err)
-	}
-	idx.SortEntries()
-	var out []ChartVersion
-	for _, cv := range idx.Entries[chartName] {
-		if v, err := semver.NewVersion(cv.Version); err != nil || v.Prerelease() != "" {
-			continue
-		}
-		out = append(out, ChartVersion{Version: cv.Version, AppVersion: cv.AppVersion})
-		if max > 0 && len(out) == max {
-			break
-		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no versions of %s/%s in the repository index", repoName, chartName)
-	}
-	return out, nil
 }
 
 func (c *Client) loadChart(r Release, opts *action.ChartPathOptions) (*chart.Chart, error) {

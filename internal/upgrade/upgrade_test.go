@@ -11,11 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"github.com/glueops/captain-utils/internal/captain"
 	"github.com/glueops/captain-utils/internal/helmx"
-	"github.com/glueops/captain-utils/internal/kube"
 	"github.com/glueops/captain-utils/internal/ui"
 )
 
@@ -25,7 +22,6 @@ type fakeHelm struct {
 	changed   bool
 	diffErr   error
 	upErr     error
-	index     []helmx.ChartVersion
 	updateErr error
 }
 
@@ -36,10 +32,6 @@ func (f *fakeHelm) RepoUpdate(_ context.Context, names ...string) error {
 func (f *fakeHelm) RepoAdd(name, url string) error {
 	f.calls = append(f.calls, "repo add "+name+" "+url)
 	return nil
-}
-func (f *fakeHelm) SearchVersions(repo, chart string, _ int) ([]helmx.ChartVersion, error) {
-	f.calls = append(f.calls, "search "+repo+"/"+chart)
-	return f.index, nil
 }
 func (f *fakeHelm) Diff(_ context.Context, r helmx.Release, _ helmx.DiffOptions, w io.Writer) (bool, error) {
 	f.calls = append(f.calls, "diff "+strings.TrimPrefix(r.Command(), "helm upgrade --install "))
@@ -63,14 +55,6 @@ func (f *fakeKube) DeleteDaemonSet(_ context.Context, ns, name string) (bool, er
 	f.calls = append(f.calls, "delete ds "+ns+"/"+name)
 	return !f.missing, nil
 }
-func (f *fakeKube) Apply(_ context.Context, obj *unstructured.Unstructured, o kube.ApplyOptions) (*unstructured.Unstructured, error) {
-	f.calls = append(f.calls, fmt.Sprintf("apply %s/%s manager=%s force=%v", obj.GetKind(), obj.GetName(), o.FieldManager, o.Force))
-	return obj, nil
-}
-
-type fakeGitHub struct{ tags []string }
-
-func (f fakeGitHub) ReleaseTags(context.Context, string, int) ([]string, error) { return f.tags, nil }
 
 type harness struct {
 	d      *Deps
@@ -92,7 +76,7 @@ const glueopsYAML = `versions:
     version: v3.31.4
 `
 
-func newHarness(t *testing.T, env string, files map[string]string, answers ...string) *harness {
+func newHarness(t *testing.T, files map[string]string, answers ...string) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	if files == nil {
@@ -109,19 +93,9 @@ func newHarness(t *testing.T, env string, files map[string]string, answers ...st
 	}
 	h := &harness{helm: &fakeHelm{changed: true}, kube: &fakeKube{}, prompt: &ui.Script{Answers: answers}, out: &bytes.Buffer{}, errs: &bytes.Buffer{}}
 	h.d = &Deps{
-		Helm: h.helm, Kube: h.kube, GitHub: fakeGitHub{tags: []string{"v0.86.0", "v0.85.0"}},
-		Prompt: h.prompt, P: ui.New(h.out, h.errs, true), Repo: captain.Repo{Dir: dir}, Env: env,
+		Helm: h.helm, Kube: h.kube,
+		Prompt: h.prompt, P: ui.New(h.out, h.errs, true), Repo: captain.Repo{Dir: dir},
 		GitInfo: func(string) string { return "main@abc1234, dirty" },
-		Fetch: func(_ context.Context, url string) ([]byte, error) {
-			switch {
-			case strings.HasSuffix(url, "kustomization.yaml"):
-				return []byte("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n- application-crd.yaml\n- appproject-crd.yaml\n"), nil
-			case strings.HasSuffix(url, ".yaml"):
-				name := strings.TrimSuffix(filepath.Base(url), "-crd.yaml")
-				return []byte("apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: " + name + "s.argoproj.io\n"), nil
-			}
-			return nil, errors.New("unexpected " + url)
-		},
 	}
 	return h
 }
@@ -139,7 +113,7 @@ func (h *harness) want(t *testing.T, got []string, want ...string) {
 
 // P0: the pinned production path: one pinned version, platform.yaml twice without overrides.yaml
 func TestPlatformPinnedNoOverrides(t *testing.T) {
-	h := newHarness(t, "production", nil, "v0.85.0", "yes")
+	h := newHarness(t, nil, "v0.85.0", "yes")
 	if err := Platform(context.Background(), h.d, PlatformOptions{}, h.out); err != nil {
 		t.Fatal(err)
 	}
@@ -160,9 +134,9 @@ func TestPlatformPinnedNoOverrides(t *testing.T) {
 }
 
 func TestPlatformOverridesAndDecline(t *testing.T) {
-	h := newHarness(t, "production", map[string]string{"VERSIONS/glueops.yaml": glueopsYAML, "platform.yaml": "", "overrides.yaml": ""}, "v0.85.0", "no")
-	if err := Platform(context.Background(), h.d, PlatformOptions{}, h.out); err != nil {
-		t.Fatal(err)
+	h := newHarness(t, map[string]string{"VERSIONS/glueops.yaml": glueopsYAML, "platform.yaml": "", "overrides.yaml": ""}, "v0.85.0", "no")
+	if err := Platform(context.Background(), h.d, PlatformOptions{}, h.out); !errors.Is(err, ui.ErrDeclined) {
+		t.Fatalf("a declined confirm must be ui.ErrDeclined (exit 3): %v", err)
 	}
 	h.want(t, h.helm.calls,
 		"repo update glueops-platform",
@@ -174,32 +148,22 @@ func TestPlatformOverridesAndDecline(t *testing.T) {
 }
 
 func TestPlatformBack(t *testing.T) {
-	h := newHarness(t, "production", nil, "Back")
+	h := newHarness(t, nil, "Back")
 	if err := Platform(context.Background(), h.d, PlatformOptions{}, h.out); err != nil || len(h.helm.calls) != 0 {
 		t.Fatalf("%v %v", err, h.helm.calls)
 	}
 }
 
-func TestPlatformDevChoosesFromReleases(t *testing.T) {
-	h := newHarness(t, "dev", map[string]string{"platform.yaml": ""}, "v0.86.0", "yes")
-	if err := Platform(context.Background(), h.d, PlatformOptions{}, h.out); err != nil {
-		t.Fatal(err)
-	}
-	if h.prompt.Asked[0] != "CHOOSE glueops-platform version [v0.86.0|v0.85.0|custom|Back]" {
-		t.Fatal(h.prompt.Asked)
-	}
-}
-
 func TestPlatformNoTerminalNeedsFlags(t *testing.T) {
-	h := newHarness(t, "production", nil)
+	h := newHarness(t, nil)
 	h.d.Prompt = noTTY{&ui.Script{}}
 	err := Platform(context.Background(), h.d, PlatformOptions{}, h.out)
-	if !errors.Is(err, ui.ErrNoTerminal) || !strings.Contains(err.Error(), "--version") {
-		t.Fatalf("%v", err)
+	if !errors.Is(err, ui.ErrNoTerminal) || !errors.Is(err, ui.ErrUsage) || !strings.Contains(err.Error(), "--version") || len(h.helm.calls) != 0 {
+		t.Fatalf("no --version without a terminal is a usage error that changes nothing: %v %v", err, h.helm.calls)
 	}
 	// with --version and no --yes: refuses at the confirm, after the diff
 	err = Platform(context.Background(), h.d, PlatformOptions{Version: "v0.85.0"}, h.out)
-	if !errors.Is(err, ui.ErrNoTerminal) || !strings.Contains(err.Error(), "--yes") {
+	if !errors.Is(err, ui.ErrNoTerminal) || errors.Is(err, ui.ErrUsage) || !strings.Contains(err.Error(), "--yes") {
 		t.Fatalf("%v", err)
 	}
 	h.d.Yes = true
@@ -212,7 +176,7 @@ func TestPlatformNoTerminalNeedsFlags(t *testing.T) {
 }
 
 func TestPlatformDiffOnlyPrintsAndStops(t *testing.T) {
-	h := newHarness(t, "production", nil)
+	h := newHarness(t, nil)
 	h.d.Prompt = noTTY{&ui.Script{}}
 	if err := Platform(context.Background(), h.d, PlatformOptions{Version: "v0.85.0", DiffOnly: true}, h.out); err != nil {
 		t.Fatal(err)
@@ -238,7 +202,7 @@ func chartDir(t *testing.T, chart string) string {
 // D-series: the custom local-directory flow
 func TestPlatformCustomFromMenu(t *testing.T) {
 	dir := chartDir(t, "name: glueops-platform\nversion: 0.86.0\n")
-	h := newHarness(t, "production", nil, "custom", dir, "yes", "yes")
+	h := newHarness(t, nil, "custom", dir, "yes", "yes")
 	if err := Platform(context.Background(), h.d, PlatformOptions{}, h.out); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +229,7 @@ func TestPlatformCustomRefusals(t *testing.T) {
 		"bad yaml":   {chartDir(t, "name: [\n"), "cannot read .name"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, "dev", nil)
+			h := newHarness(t, nil)
 			err := Platform(context.Background(), h.d, PlatformOptions{ChartDir: tc.dir}, h.out)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || len(h.helm.calls) != 0 {
 				t.Fatalf("%v %v", err, h.helm.calls)
@@ -276,33 +240,33 @@ func TestPlatformCustomRefusals(t *testing.T) {
 
 func TestPlatformCustomNameMismatchAndDecline(t *testing.T) {
 	dir := chartDir(t, "name: other\nversion: 1.0.0\n")
-	h := newHarness(t, "dev", nil, "no")
-	if err := Platform(context.Background(), h.d, PlatformOptions{ChartDir: dir}, h.out); err != nil {
+	h := newHarness(t, nil, "no")
+	if err := Platform(context.Background(), h.d, PlatformOptions{ChartDir: dir}, h.out); !errors.Is(err, ui.ErrDeclined) {
 		t.Fatal(err)
 	}
-	if len(h.helm.calls) != 0 || !strings.Contains(h.errs.String(), "Chart.yaml name is 'other'") || strings.Contains(h.errs.String(), "UNRELEASED") {
+	if len(h.helm.calls) != 0 || !strings.Contains(h.errs.String(), "Chart.yaml name is 'other'") || !strings.Contains(h.errs.String(), "UNRELEASED") {
 		t.Fatalf("%v\n%s", h.helm.calls, h.errs.String())
 	}
 }
 
 func TestPlatformCustomEmptyPathIsBack(t *testing.T) {
-	h := newHarness(t, "production", nil, "custom", "")
+	h := newHarness(t, nil, "custom", "")
 	if err := Platform(context.Background(), h.d, PlatformOptions{}, h.out); err != nil || len(h.helm.calls) != 0 {
 		t.Fatalf("%v %v", err, h.helm.calls)
 	}
 }
 
 func TestPlatformUpgradeFailure(t *testing.T) {
-	h := newHarness(t, "production", nil, "v0.85.0", "yes")
+	h := newHarness(t, nil, "v0.85.0", "yes")
 	h.helm.upErr = errors.New("UPGRADE FAILED: boom")
 	if err := Platform(context.Background(), h.d, PlatformOptions{}, h.out); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatal(err)
 	}
 }
 
-// legacy-gate: a captain on the bundle never installs ArgoCD's CRDs here
-func TestArgocdOnBundle(t *testing.T) {
-	h := newHarness(t, "production", map[string]string{"VERSIONS/glueops.yaml": glueopsYAML + "  - name: platform_crds_version\n    version: v0.1.6\n"}, "9.3.7", "yes")
+// ArgoCD's CRDs come from the platform-crds bundle: this flow never applies any
+func TestArgocdPinnedAppliesNoCRDs(t *testing.T) {
+	h := newHarness(t, nil, "9.3.7", "yes")
 	if err := Argocd(context.Background(), h.d, ArgocdOptions{}, h.out); err != nil {
 		t.Fatal(err)
 	}
@@ -314,69 +278,42 @@ func TestArgocdOnBundle(t *testing.T) {
 	if len(h.kube.calls) != 0 || !strings.Contains(h.errs.String(), "managed by the platform-crds bundle") {
 		t.Fatalf("%v %s", h.kube.calls, h.errs.String())
 	}
-	if err := Argocd(context.Background(), h.d, ArgocdOptions{Version: "9.3.7", CRDVersion: "v3.2.12"}, h.out); err == nil {
-		t.Fatal("--crd-version on the bundle must be refused")
-	}
-}
-
-func TestArgocdLegacyCRDs(t *testing.T) {
-	h := newHarness(t, "production", nil, "9.3.7", "v3.2.12", "yes")
-	if err := Argocd(context.Background(), h.d, ArgocdOptions{}, h.out); err != nil {
-		t.Fatal(err)
-	}
-	if h.prompt.Asked[1] != "CHOOSE ArgoCD CRDs to apply [v3.2.12|Skip|Back]" {
+	if h.prompt.Asked[0] != "CHOOSE argo-cd chart version [9.3.7|Back]" || len(h.prompt.Asked) != 2 {
 		t.Fatal(h.prompt.Asked)
 	}
-	h.want(t, h.kube.calls,
-		"apply CustomResourceDefinition/applications.argoproj.io manager=captain-utils force=true",
-		"apply CustomResourceDefinition/appprojects.argoproj.io manager=captain-utils force=true",
-	)
-	h.want(t, h.helm.calls,
-		"repo update argo",
-		"diff argocd argo/argo-cd --version 9.3.7 -f $DIR/argocd.yaml -n glueops-core --create-namespace --skip-crds",
-		"repo update argo",
-		"upgrade argocd argo/argo-cd --version 9.3.7 -f $DIR/argocd.yaml -n glueops-core --create-namespace --skip-crds",
-	)
 }
 
-func TestArgocdLegacySkipAndBack(t *testing.T) {
-	h := newHarness(t, "production", nil, "9.3.7", "Skip", "yes")
-	if err := Argocd(context.Background(), h.d, ArgocdOptions{}, h.out); err != nil || len(h.kube.calls) != 0 {
-		t.Fatalf("%v %v", err, h.kube.calls)
+func TestArgocdBackAndDecline(t *testing.T) {
+	h := newHarness(t, nil, "Back")
+	if err := Argocd(context.Background(), h.d, ArgocdOptions{}, h.out); err != nil || len(h.helm.calls) != 0 {
+		t.Fatalf("%v %v", err, h.helm.calls)
 	}
-	h = newHarness(t, "production", nil, "9.3.7", "Back")
-	if err := Argocd(context.Background(), h.d, ArgocdOptions{}, h.out); err != nil || len(h.helm.calls) != 1 {
+	h = newHarness(t, nil, "9.3.7", "no")
+	if err := Argocd(context.Background(), h.d, ArgocdOptions{}, h.out); !errors.Is(err, ui.ErrDeclined) || strings.HasPrefix(h.helm.calls[len(h.helm.calls)-1], "upgrade") {
 		t.Fatalf("%v %v", err, h.helm.calls)
 	}
 }
 
-func TestArgocdLegacyRefusesKustomizeFeatures(t *testing.T) {
-	h := newHarness(t, "production", nil, "yes")
-	h.d.Fetch = func(context.Context, string) ([]byte, error) {
-		return []byte("resources:\n- a.yaml\npatches:\n- path: p.yaml\n"), nil
+func TestArgocdNoTerminalNeedsVersion(t *testing.T) {
+	h := newHarness(t, nil)
+	h.d.Prompt = noTTY{&ui.Script{}}
+	err := Argocd(context.Background(), h.d, ArgocdOptions{}, h.out)
+	if !errors.Is(err, ui.ErrUsage) || !strings.Contains(err.Error(), "--version") || len(h.helm.calls) != 0 {
+		t.Fatalf("%v %v", err, h.helm.calls)
 	}
-	err := Argocd(context.Background(), h.d, ArgocdOptions{Version: "9.3.7", CRDVersion: "v3.2.12"}, h.out)
-	if err == nil || !strings.Contains(err.Error(), `"patches"`) || len(h.kube.calls) != 0 {
-		t.Fatalf("%v %v", err, h.kube.calls)
-	}
-	if strings.HasPrefix(h.helm.calls[len(h.helm.calls)-1], "upgrade") || !strings.Contains(h.errs.String(), "Pre-commands failed") {
-		t.Fatalf("%v %s", h.helm.calls, h.errs.String())
-	}
-}
-
-func TestArgocdDevUsesIndex(t *testing.T) {
-	h := newHarness(t, "dev", map[string]string{}, "9.4.0", "v3.3.0", "no")
-	h.helm.index = []helmx.ChartVersion{{Version: "9.4.0", AppVersion: "v3.3.0"}, {Version: "9.3.7", AppVersion: "v3.2.12"}}
-	if err := Argocd(context.Background(), h.d, ArgocdOptions{}, h.out); err != nil {
+	h.d.Yes = true
+	if err := Argocd(context.Background(), h.d, ArgocdOptions{Version: "9.3.7"}, h.out); err != nil {
 		t.Fatal(err)
 	}
-	if h.prompt.Asked[0] != "CHOOSE argo-cd chart version [9.4.0|9.3.7|Back]" || h.prompt.Asked[1] != "CHOOSE ArgoCD CRDs to apply [v3.3.0|Skip|Back]" {
-		t.Fatal(h.prompt.Asked)
+	if last := h.helm.calls[len(h.helm.calls)-1]; !strings.HasPrefix(last, "upgrade argocd") {
+		t.Fatal(h.helm.calls)
 	}
 }
 
-func TestCalico(t *testing.T) {
-	h := newHarness(t, "production", nil, "yes")
+const calicoDiff = "diff calico projectcalico/tigera-operator --version v3.31.4 -f $DIR/calico.yaml -n tigera-operator --create-namespace"
+
+func TestCalicoShowsTheDiffBeforeItConfirms(t *testing.T) {
+	h := newHarness(t, nil, "yes")
 	if err := Calico(context.Background(), h.d, h.out); err != nil {
 		t.Fatal(err)
 	}
@@ -384,11 +321,56 @@ func TestCalico(t *testing.T) {
 	h.want(t, h.helm.calls,
 		"repo add projectcalico https://docs.tigera.io/calico/charts",
 		"repo update projectcalico",
+		calicoDiff,
 		"upgrade calico projectcalico/tigera-operator --version v3.31.4 -f $DIR/calico.yaml -n tigera-operator --create-namespace",
 	)
-	h = newHarness(t, "production", nil, "no")
-	if err := Calico(context.Background(), h.d, h.out); err != nil || len(h.kube.calls)+len(h.helm.calls) != 0 {
+	if len(h.prompt.Paged) != 1 || len(h.prompt.Asked) != 1 || h.prompt.Asked[0] != "CONFIRM Remove the aws-node daemonset (kube-system) and apply this calico v3.31.4 upgrade?" {
+		t.Fatalf("paged %d asked %v", len(h.prompt.Paged), h.prompt.Asked)
+	}
+}
+
+func TestCalicoDeclineDeletesAndInstallsNothing(t *testing.T) {
+	h := newHarness(t, nil, "no")
+	err := Calico(context.Background(), h.d, h.out)
+	if !errors.Is(err, ui.ErrDeclined) || len(h.kube.calls) != 0 || strings.HasPrefix(h.helm.calls[len(h.helm.calls)-1], "upgrade") {
 		t.Fatalf("declined: %v %v %v", err, h.kube.calls, h.helm.calls)
+	}
+	if len(h.prompt.Paged) != 1 {
+		t.Fatal("the diff must be shown before the question")
+	}
+}
+
+func TestCalicoDiffOrRepoFailureDeletesAndInstallsNothing(t *testing.T) {
+	for name, set := range map[string]func(*fakeHelm){
+		"diff failure":    func(f *fakeHelm) { f.diffErr = errors.New("diff boom") },
+		"refresh failure": func(f *fakeHelm) { f.updateErr = errors.New("refresh boom") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil, "yes")
+			set(h.helm)
+			err := Calico(context.Background(), h.d, h.out)
+			if err == nil || !strings.Contains(err.Error(), "boom") || len(h.kube.calls) != 0 || len(h.prompt.Asked) != 0 {
+				t.Fatalf("%v %v %v", err, h.kube.calls, h.prompt.Asked)
+			}
+			for _, c := range h.helm.calls {
+				if strings.HasPrefix(c, "upgrade") {
+					t.Fatal("installed after a failure:", h.helm.calls)
+				}
+			}
+		})
+	}
+}
+
+func TestCalicoNoTerminalWithYesPrintsTheDiffThenApplies(t *testing.T) {
+	h := newHarness(t, nil)
+	h.d.Prompt = noTTY{&ui.Script{}}
+	h.d.Yes = true
+	if err := Calico(context.Background(), h.d, h.out); err != nil {
+		t.Fatal(err)
+	}
+	calls := h.helm.calls
+	if calls[len(calls)-2] != strings.ReplaceAll(calicoDiff, "$DIR", h.d.Repo.Dir) || !strings.HasPrefix(calls[len(calls)-1], "upgrade calico") || len(h.kube.calls) != 1 {
+		t.Fatalf("%v %v", calls, h.kube.calls)
 	}
 }
 

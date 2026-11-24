@@ -1,6 +1,6 @@
 // Package upgrade holds the Helm release flows of the captain_utils menu:
-// glueops-platform (pinned and "custom" local chart), argocd (with the legacy
-// ArgoCD CRD install for captains not on the platform-crds bundle) and calico.
+// glueops-platform (pinned and "custom" local chart), argocd and calico. ArgoCD's
+// CRDs come from the platform-crds bundle (the crds step), never from these flows.
 // Messages, prompts and their order are the bash menu's.
 package upgrade
 
@@ -10,14 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"time"
-
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/glueops/captain-utils/internal/captain"
 	"github.com/glueops/captain-utils/internal/helmx"
-	"github.com/glueops/captain-utils/internal/kube"
 	"github.com/glueops/captain-utils/internal/ui"
 )
 
@@ -25,7 +20,6 @@ import (
 type Helm interface {
 	RepoUpdate(ctx context.Context, names ...string) error
 	RepoAdd(name, url string) error
-	SearchVersions(repo, chart string, max int) ([]helmx.ChartVersion, error)
 	Diff(ctx context.Context, r helmx.Release, opts helmx.DiffOptions, w io.Writer) (bool, error)
 	Upgrade(ctx context.Context, r helmx.Release) (*helmx.Result, error)
 }
@@ -33,53 +27,51 @@ type Helm interface {
 // Kube is what the flows need from kube.Client.
 type Kube interface {
 	DeleteDaemonSet(ctx context.Context, namespace, name string) (bool, error)
-	Apply(ctx context.Context, obj *unstructured.Unstructured, o kube.ApplyOptions) (*unstructured.Unstructured, error)
-}
-
-// Releases lists GitHub release tags (dev mode's version lists).
-type Releases interface {
-	ReleaseTags(ctx context.Context, repo string, n int) ([]string, error)
 }
 
 // Deps is everything a flow uses.
 type Deps struct {
 	Helm    Helm
 	Kube    Kube
-	GitHub  Releases
 	Prompt  ui.Prompter
 	P       *ui.Printer
 	Repo    captain.Repo
-	Env     string // production | dev
-	Yes     bool   // --yes: confirmations answer yes
-	Color   bool   // colour the helm diff
+	Yes     bool // --yes: confirmations answer yes
+	Color   bool // colour the helm diff
 	GitInfo func(dir string) string
-	Fetch   func(ctx context.Context, url string) ([]byte, error)
 	// PathPrefill starts the local-directory prompt (PLATFORM_CHART_DIR_PREFILL).
 	PathPrefill string
 }
 
-// Production reports whether the flows read pins from VERSIONS/*.yaml.
-func (d *Deps) Production() bool { return d.Env != "dev" }
-
-// errNoTTY is returned when a flow needs an answer and has no terminal.
-func errNoTTY(what string) error {
-	return fmt.Errorf("no terminal to %s on: %w", what, ui.ErrNoTerminal)
+// errNeedFlag is returned when a flow needs a choice and has no terminal to ask on: the
+// command line has to make it, so it is a usage error.
+func errNeedFlag(what, flag string) error {
+	return ui.Usage(fmt.Errorf("no terminal to %s on: %w (pass %s)", what, ui.ErrNoTerminal, flag))
 }
 
-func (d *Deps) confirm(title string) (bool, error) {
+// confirm asks title; no (or Esc) is ui.ErrDeclined, so a flow that was declined is not
+// mistaken for one that ran. Only the --yes flag answers for the operator.
+func (d *Deps) confirm(title string) error {
 	if d.Yes {
 		d.P.Note("%s yes (--yes)", title)
-		return true, nil
+		return nil
 	}
 	if !d.Prompt.Interactive() {
-		return false, fmt.Errorf("%s: %w (pass --yes to run without one)", title, ui.ErrNoTerminal)
+		return fmt.Errorf("%s: %w (pass --yes to run without one)", title, ui.ErrNoTerminal)
 	}
-	return d.Prompt.Confirm(title)
+	ok, err := d.Prompt.Confirm(title)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ui.ErrDeclined
+	}
+	return nil
 }
 
 func (d *Deps) choose(title, flag string, options ...string) (string, error) {
 	if !d.Prompt.Interactive() {
-		return "", fmt.Errorf("%w (pass %s)", errNoTTY("choose"), flag)
+		return "", errNeedFlag("choose", flag)
 	}
 	return d.Prompt.Choose(title, options...)
 }
@@ -123,25 +115,6 @@ func (d *Deps) upgrade(ctx context.Context, r helmx.Release, out io.Writer) erro
 		fmt.Fprintf(out, "NOTES:\n%s\n", res.Notes)
 	}
 	return nil
-}
-
-// HTTPFetch GETs a URL (the legacy ArgoCD CRD install's raw.githubusercontent.com files).
-func HTTPFetch(ctx context.Context, url string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 }
 
 // ErrBack means the operator backed out; callers treat it as success.

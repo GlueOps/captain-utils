@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,7 +33,7 @@ type menuRig struct {
 	prompt *menuPrompt
 	errs   *bytes.Buffer
 	out    *bytes.Buffer
-	runs   []string // "env: args"
+	runs   []string // the subcommand args, joined
 	pre    [][]string
 	rc     map[string]int // exit code by joined args (default 0)
 	preRC  int
@@ -49,9 +48,9 @@ func newMenuRig(t *testing.T, dir string, answers ...string) *menuRig {
 	a.v.Set("captain-dir", dir)
 	a.p = ui.New(r.out, r.errs, true)
 	r.m = a.newMenu()
-	r.m.run = func(_ context.Context, env string, args ...string) int {
+	r.m.run = func(_ context.Context, args ...string) int {
 		k := strings.Join(args, " ")
-		r.runs = append(r.runs, env+": "+k)
+		r.runs = append(r.runs, k)
 		return r.rc[k]
 	}
 	r.m.preflight = func(_ context.Context, bin string, args []string) int {
@@ -82,45 +81,27 @@ func TestMenuNeedsATerminal(t *testing.T) {
 }
 
 func TestMenuProductionItemsInOrderAndTheSubcommandsTheyRun(t *testing.T) {
-	r := newMenuRig(t, t.TempDir(), "production",
+	r := newMenuRig(t, t.TempDir(),
 		"show_diff_table", "argocd", "glueops-platform", "inspect_pods", "Exit")
 	if code := r.run(); code != 0 {
 		t.Fatalf("%d %s", code, r.errs.String())
 	}
-	want := []string{
-		"production: versions diff", "production: argocd upgrade",
-		"production: platform upgrade", "production: pods watch",
-	}
+	want := []string{"versions diff", "argocd upgrade", "platform upgrade", "pods watch"}
 	if strings.Join(r.runs, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("runs:\n%s", strings.Join(r.runs, "\n"))
 	}
 	asked := r.prompt.Asked
-	if asked[0] != "CHOOSE  [dev|production|Exit]" {
-		t.Fatalf("environment menu: %q", asked[0])
-	}
-	if asked[1] != "CHOOSE  [show_diff_table|crds|argocd|glueops-platform|app_chart_preflight|aws|inspect_pods|Exit]" {
-		t.Fatalf("production menu: %q", asked[1])
+	// no dev/production chooser: the menu opens directly on the item list
+	if asked[0] != "CHOOSE  [show_diff_table|crds|argocd|glueops-platform|app_chart_preflight|aws|inspect_pods|Exit]" {
+		t.Fatalf("menu: %q", asked[0])
 	}
 	if !strings.Contains(r.errs.String(), "Showing diff table before proceeding") || !strings.Contains(r.out.String(), "Goodbye!") {
 		t.Fatalf("out %q err %q", r.out.String(), r.errs.String())
 	}
 }
 
-func TestMenuDevHasNoDiffTableOrPodInspection(t *testing.T) {
-	r := newMenuRig(t, t.TempDir(), "dev", "argocd", "Exit")
-	if code := r.run(); code != 0 {
-		t.Fatalf("%d %s", code, r.errs.String())
-	}
-	if got := r.prompt.Asked[1]; got != "CHOOSE  [crds|argocd|glueops-platform|app_chart_preflight|aws|Exit]" {
-		t.Fatalf("dev menu: %q", got)
-	}
-	if strings.Join(r.runs, "|") != "dev: argocd upgrade" {
-		t.Fatalf("%v", r.runs)
-	}
-}
-
 func TestMenuEscAtAMenuLeavesItLikeGumDid(t *testing.T) {
-	for _, tc := range [][]string{{ui.Back}, {"production", ui.Back}, {"dev", "aws", ui.Back}} {
+	for _, tc := range [][]string{{ui.Back}, {"aws", ui.Back}} {
 		r := newMenuRig(t, t.TempDir(), tc...)
 		if code := r.run(); code != 0 || len(r.runs) != 0 || !strings.Contains(r.out.String(), "Goodbye!") {
 			t.Fatalf("%v: %d runs %v out %q err %q", tc, code, r.runs, r.out.String(), r.errs.String())
@@ -129,35 +110,35 @@ func TestMenuEscAtAMenuLeavesItLikeGumDid(t *testing.T) {
 }
 
 func TestMenuAStepThatFailsReturnsToTheMenu(t *testing.T) {
-	r := newMenuRig(t, t.TempDir(), "production", "argocd", "glueops-platform", "Exit")
+	r := newMenuRig(t, t.TempDir(), "argocd", "glueops-platform", "Exit")
 	r.rc["argocd upgrade"] = 1
 	if code := r.run(); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.Join(r.runs, "|") != "production: argocd upgrade|production: platform upgrade" {
+	if strings.Join(r.runs, "|") != "argocd upgrade|platform upgrade" {
 		t.Fatalf("a failed step ended the menu: %v", r.runs)
 	}
 }
 
 func TestMenuAWSOptionsRunTheirSubcommandsAndExitEndsTheMenu(t *testing.T) {
-	r := newMenuRig(t, t.TempDir(), "production",
+	r := newMenuRig(t, t.TempDir(),
 		"aws", "calico", "aws", "eks-addons", "aws", "upgrade-eks-nodepools", "aws", "upgrade-kubernetes", "aws", "Exit")
 	if code := r.run(); code != 0 {
 		t.Fatalf("%d %s", code, r.errs.String())
 	}
-	want := "production: aws calico upgrade|production: aws eks-addons|production: aws nodepools|production: aws kubernetes"
+	want := "aws calico upgrade|aws eks-addons|aws nodepools|aws kubernetes"
 	if strings.Join(r.runs, "|") != want {
 		t.Fatalf("%v", r.runs)
 	}
 	if len(r.prompt.Answers) != 0 || !strings.Contains(r.out.String(), "Goodbye!") {
 		t.Fatalf("aws → Exit did not end the menu (left %v)", r.prompt.Answers)
 	}
-	if got := r.prompt.Asked[2]; got != "CHOOSE  [calico|eks-addons|upgrade-eks-nodepools|upgrade-kubernetes|Exit]" {
+	if got := r.prompt.Asked[1]; got != "CHOOSE  [calico|eks-addons|upgrade-eks-nodepools|upgrade-kubernetes|Exit]" {
 		t.Fatalf("aws menu: %q", got)
 	}
 }
 
-func TestMenuCRDsProductionNotOnTheBundleSaysSoAndRunsNothing(t *testing.T) {
+func TestMenuCRDsWithoutAValidPinSaysSoAndRunsNothing(t *testing.T) {
 	for name, pins := range map[string]string{
 		"no pin":       "  - name: argocd_helm_chart_version\n    version: 9.3.7\n",
 		"not a tag":    "  - name: platform_crds_version\n    version: feat/otel-20260902\n",
@@ -168,11 +149,11 @@ func TestMenuCRDsProductionNotOnTheBundleSaysSoAndRunsNothing(t *testing.T) {
 		if name == "missing file" {
 			dir = t.TempDir()
 		}
-		r := newMenuRig(t, dir, "production", "crds", "Exit")
+		r := newMenuRig(t, dir, "crds", "Exit")
 		if code := r.run(); code != 0 || len(r.runs) != 0 {
 			t.Fatalf("%s: %d %v", name, code, r.runs)
 		}
-		if !strings.Contains(r.errs.String(), "not on the platform-crds bundle yet") || !strings.Contains(r.errs.String(), "terraform apply") {
+		if !strings.Contains(r.errs.String(), "could not determine the platform-crds version") {
 			t.Fatalf("%s: %q", name, r.errs.String())
 		}
 	}
@@ -180,14 +161,14 @@ func TestMenuCRDsProductionNotOnTheBundleSaysSoAndRunsNothing(t *testing.T) {
 
 func TestMenuCRDsProductionAppliesThePinAndOffersCustomAndBack(t *testing.T) {
 	dir := glueopsPins(t, "  - name: platform_crds_version\n    version: v0.1.6\n")
-	r := newMenuRig(t, dir, "production", "crds", "v0.1.6", "Exit")
-	if code := r.run(); code != 0 || strings.Join(r.runs, "|") != "production: crds apply --version v0.1.6" {
+	r := newMenuRig(t, dir, "crds", "v0.1.6", "Exit")
+	if code := r.run(); code != 0 || strings.Join(r.runs, "|") != "crds apply --version v0.1.6" {
 		t.Fatalf("%d %v", code, r.runs)
 	}
-	if got := r.prompt.Asked[2]; got != "CHOOSE  [v0.1.6|custom|Back]" {
+	if got := r.prompt.Asked[1]; got != "CHOOSE  [v0.1.6|custom|Back]" {
 		t.Fatalf("crds menu: %q", got)
 	}
-	r = newMenuRig(t, dir, "production", "crds", "Back", "Exit")
+	r = newMenuRig(t, dir, "crds", "Back", "Exit")
 	if r.run(); len(r.runs) != 0 {
 		t.Fatalf("Back still ran %v", r.runs)
 	}
@@ -195,12 +176,12 @@ func TestMenuCRDsProductionAppliesThePinAndOffersCustomAndBack(t *testing.T) {
 
 func TestMenuCRDsFailureNamesWhatWasNotAppliedAndGoesOn(t *testing.T) {
 	dir := glueopsPins(t, "  - name: platform_crds_version\n    version: v0.1.6\n")
-	r := newMenuRig(t, dir, "production", "crds", "v0.1.6", "argocd", "Exit")
+	r := newMenuRig(t, dir, "crds", "v0.1.6", "argocd", "Exit")
 	r.rc["crds apply --version v0.1.6"] = 1
 	if code := r.run(); code != 0 || len(r.runs) != 2 {
 		t.Fatalf("%d %v", code, r.runs)
 	}
-	if !strings.Contains(r.errs.String(), "platform-crds v0.1.6 NOT applied") {
+	if !strings.Contains(r.errs.String(), "platform-crds v0.1.6 NOT applied, or only partly") {
 		t.Fatalf("%q", r.errs.String())
 	}
 }
@@ -208,12 +189,12 @@ func TestMenuCRDsFailureNamesWhatWasNotAppliedAndGoesOn(t *testing.T) {
 func TestMenuCRDsCustomWarnsAsksForTheCheckoutAndAppliesIt(t *testing.T) {
 	dir := glueopsPins(t, "  - name: platform_crds_version\n    version: v0.1.6\n")
 	checkout := t.TempDir()
-	r := newMenuRig(t, dir, "production", "crds", "custom", checkout, "Exit")
+	r := newMenuRig(t, dir, "crds", "custom", checkout, "Exit")
 	r.rc["crds apply --chart-dir "+ui.CleanPath(checkout)] = 1
 	if code := r.run(); code != 0 {
 		t.Fatalf("%d", code)
 	}
-	if len(r.runs) != 1 || r.runs[0] != "production: crds apply --chart-dir "+ui.CleanPath(checkout) {
+	if len(r.runs) != 1 || r.runs[0] != "crds apply --chart-dir "+ui.CleanPath(checkout) {
 		t.Fatalf("%v", r.runs)
 	}
 	for _, w := range []string{"custom applies UNRELEASED CRDs", "NOT applied"} {
@@ -222,16 +203,21 @@ func TestMenuCRDsCustomWarnsAsksForTheCheckoutAndAppliesIt(t *testing.T) {
 		}
 	}
 	// an empty path is "back"
-	r = newMenuRig(t, dir, "production", "crds", "custom", "", "Exit")
+	r = newMenuRig(t, dir, "crds", "custom", "", "Exit")
 	if r.run(); len(r.runs) != 0 {
 		t.Fatalf("empty path ran %v", r.runs)
 	}
 }
 
-func TestMenuCRDsDevLetsTheCommandChooseTheRelease(t *testing.T) {
-	r := newMenuRig(t, t.TempDir(), "dev", "crds", "Exit")
-	if r.run(); strings.Join(r.runs, "|") != "dev: crds apply" {
-		t.Fatalf("%v", r.runs)
+func TestMenuCRDsDeclinedIsSkippedNotAFailure(t *testing.T) {
+	dir := glueopsPins(t, "  - name: platform_crds_version\n    version: v0.1.6\n")
+	r := newMenuRig(t, dir, "crds", "v0.1.6", "Exit")
+	r.rc["crds apply --version v0.1.6"] = ExitDeclined
+	if code := r.run(); code != 0 {
+		t.Fatalf("%d", code)
+	}
+	if strings.Contains(r.errs.String(), "NOT applied") || !strings.Contains(r.errs.String(), "platform-crds v0.1.6 skipped") {
+		t.Fatalf("a declined apply is not a failure: %q", r.errs.String())
 	}
 }
 
@@ -281,7 +267,7 @@ metadata:
 `
 
 func TestMenuPreflightMissingBinary(t *testing.T) {
-	r := newMenuRig(t, t.TempDir(), "dev", "app_chart_preflight", "Exit")
+	r := newMenuRig(t, t.TempDir(), "app_chart_preflight", "Exit")
 	r.m.lookPath = func(string) (string, error) { return "", errors.New("not found") }
 	if code := r.run(); code != 0 || len(r.pre) != 0 || !strings.Contains(r.errs.String(), "app-chart-preflight is not installed") {
 		t.Fatalf("%d %v %q", code, r.pre, r.errs.String())
@@ -292,7 +278,7 @@ func TestMenuPreflightAllSetsAndOneSet(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "manifests/manifest.yaml"), preflightManifest)
 
-	r := newMenuRig(t, dir, "dev", "app_chart_preflight", " 0.1 8.0 ", "all", "Exit")
+	r := newMenuRig(t, dir, "app_chart_preflight", " 0.1 8.0 ", "all", "Exit")
 	r.m.getenv = func(k string) string {
 		if k == "CAPTAIN_UTILS_PREFLIGHT" {
 			return "/opt/preflight"
@@ -305,14 +291,14 @@ func TestMenuPreflightAllSetsAndOneSet(t *testing.T) {
 	if len(r.pre) != 1 || strings.Join(r.pre[0], " ") != "/opt/preflight --target 0.18.0" {
 		t.Fatalf("%v", r.pre)
 	}
-	if got := r.prompt.Asked[3]; got != "CHOOSE  [all|tenants|platform-apps|Back]" {
+	if got := r.prompt.Asked[2]; got != "CHOOSE  [all|tenants|platform-apps|Back]" {
 		t.Fatalf("set chooser: %q", got)
 	}
 	if !strings.Contains(r.errs.String(), `Preflight ok: bump only the sets under "Safe to bump"`) {
 		t.Fatalf("%q", r.errs.String())
 	}
 
-	r = newMenuRig(t, dir, "dev", "app_chart_preflight", "v0.18.0", "tenants", "Exit")
+	r = newMenuRig(t, dir, "app_chart_preflight", "v0.18.0", "tenants", "Exit")
 	r.run()
 	if len(r.pre) != 1 || strings.Join(r.pre[0], " ") != "app-chart-preflight --target v0.18.0 --appset tenants" {
 		t.Fatalf("%v", r.pre)
@@ -323,7 +309,7 @@ func TestMenuPreflightAllSetsAndOneSet(t *testing.T) {
 }
 
 func TestMenuPreflightLooksAtTheSameClusterAsTheOtherItems(t *testing.T) {
-	r := newMenuRig(t, t.TempDir(), "dev", "app_chart_preflight", "0.18.0", "all", "Exit")
+	r := newMenuRig(t, t.TempDir(), "app_chart_preflight", "0.18.0", "all", "Exit")
 	r.m.a.v.Set("kube-context", "k3d-venus")
 	r.run()
 	if len(r.pre) != 1 || strings.Join(r.pre[0], " ") != "app-chart-preflight --target 0.18.0 --context k3d-venus" {
@@ -333,7 +319,7 @@ func TestMenuPreflightLooksAtTheSameClusterAsTheOtherItems(t *testing.T) {
 
 func TestMenuPreflightVerdicts(t *testing.T) {
 	for rc, want := range map[int]string{1: "do NOT bump the sets it names", 2: "no verdict for some sets (exit 2)", 124: "(exit 124)"} {
-		r := newMenuRig(t, t.TempDir(), "dev", "app_chart_preflight", "1.0.0", "all", "Exit")
+		r := newMenuRig(t, t.TempDir(), "app_chart_preflight", "1.0.0", "all", "Exit")
 		r.preRC = rc
 		if code := r.run(); code != 0 || !strings.Contains(r.errs.String(), want) {
 			t.Fatalf("rc %d: exit %d %q", rc, code, r.errs.String())
@@ -343,8 +329,8 @@ func TestMenuPreflightVerdicts(t *testing.T) {
 
 func TestMenuPreflightBackOutsRunNothing(t *testing.T) {
 	for _, answers := range [][]string{
-		{"dev", "app_chart_preflight", "   ", "Exit"},           // empty target
-		{"dev", "app_chart_preflight", "1.0.0", "Back", "Exit"}, // Back at the set chooser
+		{"app_chart_preflight", "   ", "Exit"},           // empty target
+		{"app_chart_preflight", "1.0.0", "Back", "Exit"}, // Back at the set chooser
 	} {
 		r := newMenuRig(t, t.TempDir(), answers...)
 		if code := r.run(); code != 0 || len(r.pre) != 0 {
@@ -356,14 +342,14 @@ func TestMenuPreflightBackOutsRunNothing(t *testing.T) {
 func TestMenuItemsInheritTheGlobalFlags(t *testing.T) {
 	r := newMenuRig(t, "/captain", "Exit")
 	r.m.a.v.Set("kube-context", "k3d-venus")
-	r.m.a.v.Set("yes", true)
+	r.m.a.yes = true
 	r.m.a.v.Set("no-color", true)
-	got := strings.Join(r.m.globalArgs("dev"), " ")
-	if got != "--env dev --captain-dir /captain --kube-context k3d-venus --yes --no-color" {
+	got := strings.Join(r.m.globalArgs(), " ")
+	if got != "--captain-dir /captain --kube-context k3d-venus --yes --no-color" {
 		t.Fatal(got)
 	}
-	got = strings.Join(newMenuRig(t, ".", "Exit").m.globalArgs("production"), " ")
-	if got != "--env production --captain-dir ." {
+	got = strings.Join(newMenuRig(t, ".", "Exit").m.globalArgs(), " ")
+	if got != "--captain-dir ." {
 		t.Fatal(got)
 	}
 }
@@ -386,10 +372,10 @@ func TestMenuArgsOnlyTheCaptainUtilsNameWithNoArgumentsOpensTheMenu(t *testing.T
 	}
 }
 
-// The real command: a stray environment variable does not break it (the bash menu
-// overwrote it), and a CRDS_AUTO_CONFIRM left in the shell is dropped.
-func TestMenuCommandIgnoresEnvAndDropsAutoConfirm(t *testing.T) {
-	t.Setenv("environment", "staging")
+// A CAPTAIN_UTILS_YES or CRDS_AUTO_CONFIRM left in the shell neither skips a confirm nor
+// leaks into the items the menu runs; the menu still opens on the item list.
+func TestMenuCommandIgnoresApprovalEnvironmentVariables(t *testing.T) {
+	t.Setenv("CAPTAIN_UTILS_YES", "true")
 	t.Setenv("CRDS_AUTO_CONFIRM", "yes")
 	var out, errb bytes.Buffer
 	a := NewApp("v0.0.0-test", "abc", &out, &errb)
@@ -400,8 +386,8 @@ func TestMenuCommandIgnoresEnvAndDropsAutoConfirm(t *testing.T) {
 	if !strings.Contains(out.String(), "Goodbye!") {
 		t.Fatalf("%q", out.String())
 	}
-	if _, set := os.LookupEnv("CRDS_AUTO_CONFIRM"); set {
-		t.Fatal("CRDS_AUTO_CONFIRM was left set")
+	if a.opts().Yes || strings.Contains(strings.Join(a.newMenu().globalArgs(), " "), "--yes") {
+		t.Fatal("an environment variable approved confirmations")
 	}
 }
 
@@ -415,24 +401,24 @@ func TestMenuRunsRealSubcommandsThroughAChildApp(t *testing.T) {
 	a.Root()
 	a.p = ui.New(&out, &errb, true)
 	m := a.newMenu()
-	if code := m.run(context.Background(), "production", "pods", "watch", "--once"); code != 0 {
+	if code := m.run(context.Background(), "pods", "watch", "--once"); code != 0 {
 		t.Fatalf("%d %s", code, errb.String())
 	}
 	if !strings.Contains(out.String(), "broken") {
 		t.Fatalf("%q", out.String())
 	}
 	// the child reports its own failures with its own exit code, and the parent app is untouched
-	if code := m.run(context.Background(), "production", "crds", "bogus"); code != 1 || !strings.Contains(errb.String(), "unknown command") {
+	if code := m.run(context.Background(), "crds", "bogus"); code != ExitUsage || !strings.Contains(errb.String(), "unknown command") {
 		t.Fatalf("%d %q", code, errb.String())
 	}
 }
 
-// Through the whole stack: the real command, a scripted environment choice, Exit.
-func TestMenuEndToEndDevThenExit(t *testing.T) {
+// Through the whole stack: the real command opens on the item list; Exit leaves it.
+func TestMenuEndToEndOpensOnTheItemsThenExit(t *testing.T) {
 	var out, errb bytes.Buffer
 	a := NewApp("v0.0.0-test", "abc", &out, &errb)
 	a.NewCluster = func(string) (Cluster, error) { return fakeCluster{}, nil }
-	a.Prompt = &menuPrompt{Script: ui.Script{Answers: []string{"dev", "Exit"}}}
+	a.Prompt = &menuPrompt{Script: ui.Script{Answers: []string{"Exit"}}}
 	if code := a.Execute(context.Background(), []string{"--captain-dir", t.TempDir(), "menu"}); code != 0 || !strings.Contains(out.String(), "Goodbye!") {
 		t.Fatalf("%d %q %q", code, out.String(), errb.String())
 	}

@@ -61,7 +61,7 @@ func TestCRDsCheckExitCodes(t *testing.T) {
 
 func TestCRDsVersionAndChartDirAreExclusive(t *testing.T) {
 	code, _, errs := runCRDs(t, captainDir(t), "crds", "apply", "--version", "v0.1.6", "--chart-dir", "x")
-	if code == 0 || !strings.Contains(errs, "none of the others can be") && !strings.Contains(errs, "if any flags in the group") {
+	if code != 2 || !strings.Contains(errs, "none of the others can be") && !strings.Contains(errs, "if any flags in the group") {
 		t.Fatalf("%d %q", code, errs)
 	}
 }
@@ -72,8 +72,8 @@ func TestCRDsApplyWithoutTerminalNeedsYes(t *testing.T) {
 	mustWrite(t, dir+"/VERSIONS/glueops.yaml", "versions:\n  - name: platform_crds_version\n    version: v0.1.6\n")
 	code, _, errs := runWith(t, func(a *App) {
 		a.Prompt = &noTerminal{}
-	}, "--captain-dir", dir, "crds", "apply")
-	if code == 0 || !strings.Contains(errs, "--yes") {
+	}, "--captain-dir", dir, "crds", "apply", "--version", "v0.1.6")
+	if code != 1 || !strings.Contains(errs, "--yes") {
 		t.Fatalf("%d %q", code, errs)
 	}
 }
@@ -102,7 +102,7 @@ func TestUnknownSubcommandOfAGroupFailsInsteadOfPrintingHelp(t *testing.T) {
 	// regression: `crds apply-dir DIR` (the bash command's name) exited 0 and did nothing
 	for _, args := range [][]string{{"crds", "apply-dir", "x"}, {"platform", "bogus"}, {"aws", "calico", "bogus"}} {
 		code, _, errs := run(t, fakeCluster{}, nil, args...)
-		if code == 0 || !strings.Contains(errs, "unknown command") {
+		if code != 2 || !strings.Contains(errs, "unknown command") {
 			t.Fatalf("%v: %d %q", args, code, errs)
 		}
 	}
