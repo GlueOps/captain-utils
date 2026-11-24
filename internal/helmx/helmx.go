@@ -90,7 +90,11 @@ func New(kubeContext string, log io.Writer) *Client {
 
 func (c *Client) config(namespace string) (*action.Configuration, error) {
 	cfg := new(action.Configuration)
-	s := *c.Settings
+	// Not a copy of c.Settings: the REST getter keeps a pointer to the namespace field of the
+	// struct cli.New built it in, so SetNamespace on a copy would leave objects without a
+	// metadata.namespace in the kubeconfig's default namespace, not in the release's.
+	s := cli.New()
+	s.KubeContext, s.KubeConfig = c.Settings.KubeContext, c.Settings.KubeConfig
 	s.SetNamespace(namespace)
 	if err := cfg.Init(s.RESTClientGetter(), namespace, os.Getenv("HELM_DRIVER"), func(string, ...interface{}) {}); err != nil {
 		return nil, fmt.Errorf("helm: %w", err)
