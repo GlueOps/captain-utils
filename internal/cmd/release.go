@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -211,7 +212,43 @@ func (a *App) podsCmd() *cobra.Command {
 	watch.Flags().DurationVar(&interval, "interval", 5*time.Second, "refresh interval")
 	watch.Flags().BoolVar(&once, "once", false, "print one snapshot and exit")
 	watch.Flags().BoolVar(&all, "all", false, "list every pod, not only unhealthy ones")
-	c.AddCommand(watch)
+	var output string
+	var listAll bool
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "One snapshot of the unhealthy pods (every pod with --all), then exit",
+		Long: "Prints once, without a refresh loop, the pods whose status contains " + strings.Join(kube.UnhealthyStatuses, ", ") +
+			".\nWith -o json stdout is a JSON array of {namespace, name, ready, status, restarts, age} ([] when none).",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if output != "text" && output != "json" {
+				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", output)}
+			}
+			cl, err := a.cluster()
+			if err != nil {
+				return err
+			}
+			if output == "text" {
+				return a.watchPods(cmd.Context(), cl, 0, true, listAll)
+			}
+			rows, err := cl.Pods(cmd.Context(), time.Now())
+			if err != nil {
+				return err
+			}
+			out := []kube.PodRow{}
+			for _, r := range rows {
+				if listAll || kube.Unhealthy(r) {
+					out = append(out, r)
+				}
+			}
+			enc := json.NewEncoder(a.Out)
+			enc.SetIndent("", "  ")
+			return enc.Encode(out)
+		},
+	}
+	list.Flags().StringVarP(&output, "output", "o", "text", "result format: text or json")
+	list.Flags().BoolVar(&listAll, "all", false, "list every pod, not only unhealthy ones")
+	c.AddCommand(watch, list)
 	return c
 }
 

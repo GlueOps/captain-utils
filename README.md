@@ -242,6 +242,19 @@ lines to stderr.
   release's, so ArgoCD reported `project glueops-core does not exist`. The release record was right; the objects were not.
 - `CAPTAIN_UTILS_YES` is removed (only `--yes` / `-y` approves), like `CRDS_AUTO_CONFIRM`.
 
+## Agent use (changes after phase 4)
+
+- `pods list [--all] [-o json]` is a one-shot snapshot (the unhealthy pods, or every pod with `--all`);
+  `-o json` prints an array of `{namespace, name, ready, status, restarts, age}` (`[]` when none).
+  `pods watch` stays the refresh loop.
+- `aws eks-addons|kubernetes|nodepools` take `-o json`: stdout is one
+  `{file, dryRun, changed, written, changes: [{line, key, old, new}], diff, error}` and the diff text is in
+  `diff`. Exit codes are unchanged, and a failure still prints the object with `error` set.
+- `versions diff` accepts `-o text` (the table) like every other command; `table`, `csv` and `json` still work.
+  An invalid `-o` value is a usage error (exit 2).
+- A command line cobra rejects before the command runs (an unknown flag, say) prints
+  `{"error": "..."}` on stdout, exit 2, when `-o json` is on the line. Without `-o json` stdout stays empty.
+
 ## Development
 
 ```sh

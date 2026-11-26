@@ -14,9 +14,12 @@ import (
 
 // PodRow is one line of `kubectl get pods -A`.
 type PodRow struct {
-	Namespace, Name, Ready, Status string
-	Restarts                       int32
-	Age                            string
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Ready     string `json:"ready"`
+	Status    string `json:"status"`
+	Restarts  int32  `json:"restarts"`
+	Age       string `json:"age"`
 }
 
 // String formats the row like kubectl's columns.

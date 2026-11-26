@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -191,6 +192,9 @@ func (a *App) Execute(ctx context.Context, args []string) int {
 		if !ee.Silent && ee.Err != nil {
 			a.printer().Error("%v", ee.Err)
 		}
+		if ee.Code == ExitUsage && ee.Err != nil {
+			a.usageJSON(args, ee.Err)
+		}
 		return ee.Code
 	}
 	if errors.Is(err, ui.ErrDeclined) {
@@ -198,9 +202,36 @@ func (a *App) Execute(ctx context.Context, args []string) int {
 	}
 	a.printer().Error("%v", err)
 	if errors.Is(err, ui.ErrUsage) || !a.running {
+		a.usageJSON(args, err)
 		return ExitUsage
 	}
 	return 1
+}
+
+// usageJSON answers on stdout when the command line asked for -o json but cobra rejected it
+// before any command ran (an unknown flag, a bad value for another flag): a script reads one stream.
+func (a *App) usageJSON(args []string, err error) {
+	if a.running || !wantsJSON(args) {
+		return
+	}
+	b, _ := json.MarshalIndent(map[string]string{"error": err.Error()}, "", "  ")
+	fmt.Fprintln(a.Out, string(b))
+}
+
+func wantsJSON(args []string) bool {
+	for i, s := range args {
+		switch {
+		case s == "--":
+			return false
+		case s == "-o" || s == "--output":
+			if i+1 < len(args) && args[i+1] == "json" {
+				return true
+			}
+		case s == "-ojson" || s == "-o=json" || s == "--output=json":
+			return true
+		}
+	}
+	return false
 }
 
 // markRunning wraps every command's RunE to record that the command line was accepted.
