@@ -1,23 +1,18 @@
 // Package upgrade holds the Helm release flows of the captain_utils menu:
-// glueops-platform (pinned and "custom" local chart), argocd (with the legacy
-// ArgoCD CRD install for captains not on the platform-crds bundle) and calico.
+// glueops-platform (pinned and "custom" local chart), argocd and calico. ArgoCD's
+// CRDs come from the platform-crds bundle (the crds step), never from these flows.
 // Messages, prompts and their order are the bash menu's.
 package upgrade
 
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"time"
-
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"strings"
 
 	"github.com/glueops/captain-utils/internal/captain"
 	"github.com/glueops/captain-utils/internal/helmx"
-	"github.com/glueops/captain-utils/internal/kube"
 	"github.com/glueops/captain-utils/internal/ui"
 )
 
@@ -25,73 +20,76 @@ import (
 type Helm interface {
 	RepoUpdate(ctx context.Context, names ...string) error
 	RepoAdd(name, url string) error
-	SearchVersions(repo, chart string, max int) ([]helmx.ChartVersion, error)
 	Diff(ctx context.Context, r helmx.Release, opts helmx.DiffOptions, w io.Writer) (bool, error)
+	ReleaseExists(ctx context.Context, r helmx.Release) (bool, error)
 	Upgrade(ctx context.Context, r helmx.Release) (*helmx.Result, error)
 }
 
 // Kube is what the flows need from kube.Client.
 type Kube interface {
 	DeleteDaemonSet(ctx context.Context, namespace, name string) (bool, error)
-	Apply(ctx context.Context, obj *unstructured.Unstructured, o kube.ApplyOptions) (*unstructured.Unstructured, error)
-}
-
-// Releases lists GitHub release tags (dev mode's version lists).
-type Releases interface {
-	ReleaseTags(ctx context.Context, repo string, n int) ([]string, error)
 }
 
 // Deps is everything a flow uses.
 type Deps struct {
 	Helm    Helm
 	Kube    Kube
-	GitHub  Releases
 	Prompt  ui.Prompter
 	P       *ui.Printer
 	Repo    captain.Repo
-	Env     string // production | dev
-	Yes     bool   // --yes: confirmations answer yes
-	Color   bool   // colour the helm diff
+	Yes     bool // --yes: confirmations answer yes
+	Color   bool // colour the helm diff
 	GitInfo func(dir string) string
-	Fetch   func(ctx context.Context, url string) ([]byte, error)
+	// Result, when set, collects what the flow did for -o json. The flow then keeps the helm
+	// diff out of the output and the pager: it goes into Result.Diff.
+	Result *Result
+	// NoDiff (-o json --no-diff) leaves the diff text out of Result: Changed and DiffLines remain.
+	NoDiff bool
 	// PathPrefill starts the local-directory prompt (PLATFORM_CHART_DIR_PREFILL).
 	PathPrefill string
 }
 
-// Production reports whether the flows read pins from VERSIONS/*.yaml.
-func (d *Deps) Production() bool { return d.Env != "dev" }
-
-// errNoTTY is returned when a flow needs an answer and has no terminal.
-func errNoTTY(what string) error {
-	return fmt.Errorf("no terminal to %s on: %w", what, ui.ErrNoTerminal)
+// errNeedFlag is returned when a flow needs a choice and has no terminal to ask on: the
+// command line has to make it, so it is a usage error.
+func errNeedFlag(what, flag string) error {
+	return ui.Usage(fmt.Errorf("no terminal to %s on: %w (pass %s)", what, ui.ErrNoTerminal, flag))
 }
 
-func (d *Deps) confirm(title string) (bool, error) {
-	if d.Yes {
-		d.P.Note("%s yes (--yes)", title)
-		return true, nil
-	}
-	if !d.Prompt.Interactive() {
-		return false, fmt.Errorf("%s: %w (pass --yes to run without one)", title, ui.ErrNoTerminal)
-	}
-	return d.Prompt.Confirm(title)
-}
+// confirm asks title; only the --yes flag answers for the operator (see ui.Confirm).
+func (d *Deps) confirm(title string) error { return ui.Confirm(d.Prompt, d.P, d.Yes, title) }
 
 func (d *Deps) choose(title, flag string, options ...string) (string, error) {
-	if !d.Prompt.Interactive() {
-		return "", fmt.Errorf("%w (pass %s)", errNoTTY("choose"), flag)
-	}
 	return d.Prompt.Choose(title, options...)
 }
 
 // showDiff renders the helm diff and pages it (or prints it with diffOnly).
 func (d *Deps) showDiff(ctx context.Context, r helmx.Release, diffOnly bool, out io.Writer) error {
 	var buf bytes.Buffer
+	d.Result.release(r)
 	changed, err := d.Helm.Diff(ctx, r, helmx.DiffOptions{Color: d.Color}, &buf)
 	if err != nil {
 		return err
 	}
+	if d.Result != nil {
+		d.Result.Changed, d.Result.DiffLines = &changed, strings.Count(buf.String(), "\n")
+		if !d.NoDiff {
+			d.Result.Diff = buf.String()
+		}
+		if diffOnly {
+			d.Result.Action = ActionDiff
+		}
+	}
 	switch {
+	case d.Result != nil:
+		// -o json: the diff is in the result, nothing to page. But an operator who is about to be
+		// asked sees it on stderr (out), or the confirm would be answered blind.
+		if !changed {
+			d.P.Note("helm diff: no changes for %s in %s", r.Name, r.Namespace)
+		} else if !diffOnly && !d.Yes && d.Prompt.Interactive() {
+			if _, err := out.Write(buf.Bytes()); err != nil {
+				return err
+			}
+		}
 	case !changed:
 		d.P.Note("helm diff: no changes for %s in %s", r.Name, r.Namespace)
 	case diffOnly:
@@ -110,13 +108,20 @@ func (d *Deps) showDiff(ctx context.Context, r helmx.Release, diffOnly bool, out
 func (d *Deps) upgrade(ctx context.Context, r helmx.Release, out io.Writer) error {
 	d.P.Highlight("The following commands will be executed:")
 	d.P.Note("+ %s", r.Command())
+	d.Result.release(r)
 	res, err := d.Helm.Upgrade(ctx, r)
 	if err != nil {
+		if d.Result != nil {
+			d.Result.Action = ActionFailed // the upgrade was attempted: the release may be half-changed
+		}
 		return err
 	}
-	verb := "upgraded"
+	verb := ActionUpgraded
 	if res.Installed {
-		verb = "installed"
+		verb = ActionInstalled
+	}
+	if d.Result != nil {
+		d.Result.Action, d.Result.Status, d.Result.Revision, d.Result.Notes = verb, res.Status, res.Revision, res.Notes
 	}
 	fmt.Fprintf(out, "Release %q has been %s. Happy Helming!\nNAME: %s\nNAMESPACE: %s\nSTATUS: %s\nREVISION: %d\n", res.Name, verb, res.Name, res.Namespace, res.Status, res.Revision)
 	if res.Notes != "" {
@@ -124,25 +129,3 @@ func (d *Deps) upgrade(ctx context.Context, r helmx.Release, out io.Writer) erro
 	}
 	return nil
 }
-
-// HTTPFetch GETs a URL (the legacy ArgoCD CRD install's raw.githubusercontent.com files).
-func HTTPFetch(ctx context.Context, url string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-}
-
-// ErrBack means the operator backed out; callers treat it as success.
-var ErrBack = errors.New("back")

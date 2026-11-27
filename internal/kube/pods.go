@@ -14,9 +14,12 @@ import (
 
 // PodRow is one line of `kubectl get pods -A`.
 type PodRow struct {
-	Namespace, Name, Ready, Status string
-	Restarts                       int32
-	Age                            string
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Ready     string `json:"ready"`
+	Status    string `json:"status"`
+	Restarts  int32  `json:"restarts"`
+	Age       string `json:"age"`
 }
 
 // String formats the row like kubectl's columns.
@@ -50,8 +53,18 @@ func (c *Client) Pods(ctx context.Context, now time.Time) ([]PodRow, error) {
 // (the same precedence as kubectl's printPod: pod reason, then init
 // containers, then containers, then deletion).
 func PodRowOf(pod *corev1.Pod, now time.Time) PodRow {
-	var restarts int32
+	var restarts, sidecarRestarts int32
 	ready := 0
+	// native sidecars: init containers with restartPolicy Always keep running next to the
+	// containers, so (as in kubectl) they count in READY and their restarts in RESTARTS
+	total := len(pod.Spec.Containers)
+	sidecar := map[string]bool{}
+	for _, c := range pod.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			sidecar[c.Name] = true
+			total++
+		}
+	}
 	reason := string(pod.Status.Phase)
 	if pod.Status.Reason != "" {
 		reason = pod.Status.Reason
@@ -61,6 +74,12 @@ func PodRowOf(pod *corev1.Pod, now time.Time) PodRow {
 		restarts += cs.RestartCount
 		switch {
 		case cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0:
+			continue
+		case sidecar[cs.Name] && cs.Started != nil && *cs.Started:
+			sidecarRestarts += cs.RestartCount
+			if cs.Ready {
+				ready++
+			}
 			continue
 		case cs.State.Terminated != nil:
 			switch {
@@ -79,7 +98,8 @@ func PodRowOf(pod *corev1.Pod, now time.Time) PodRow {
 		initializing = true
 		break
 	}
-	if !initializing {
+	if !initializing || podInitialized(pod) {
+		restarts = sidecarRestarts
 		hasRunning := false
 		for i := len(pod.Status.ContainerStatuses) - 1; i >= 0; i-- {
 			cs := pod.Status.ContainerStatuses[i]
@@ -112,11 +132,21 @@ func PodRowOf(pod *corev1.Pod, now time.Time) PodRow {
 	return PodRow{
 		Namespace: pod.Namespace,
 		Name:      pod.Name,
-		Ready:     fmt.Sprintf("%d/%d", ready, len(pod.Spec.Containers)),
+		Ready:     fmt.Sprintf("%d/%d", ready, total),
 		Status:    reason,
 		Restarts:  restarts,
 		Age:       duration.HumanDuration(now.Sub(pod.CreationTimestamp.Time)),
 	}
+}
+
+// podInitialized is the Initialized=True condition.
+func podInitialized(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodInitialized {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // UnhealthyStatuses are the statuses the inspect_pods menu item watched for.

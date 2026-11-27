@@ -62,25 +62,26 @@ func TestMissingFile(t *testing.T) {
 	}
 }
 
-func TestCRDsBundleEnabled(t *testing.T) {
+func TestPlatformCRDsPin(t *testing.T) {
 	for name, tc := range map[string]struct {
 		body string
-		want bool
+		want string // empty: an error
 	}{
-		"tag":        {"versions:\n  - name: platform_crds_version\n    version: v0.1.6\n", true},
-		"no v":       {"versions:\n  - name: platform_crds_version\n    version: 0.1.6\n", true},
-		"branch":     {"versions:\n  - name: platform_crds_version\n    version: main\n", false},
-		"missing":    {"versions:\n  - name: codespace_version\n    version: v1.0.0\n", false},
-		"duplicated": {"versions:\n  - name: platform_crds_version\n    version: v0.1.6\n  - name: platform_crds_version\n    version: v0.1.7\n", false},
+		"tag":        {"versions:\n  - name: platform_crds_version\n    version: v0.1.6\n", "v0.1.6"},
+		"no v":       {"versions:\n  - name: platform_crds_version\n    version: 0.1.6\n", "0.1.6"},
+		"branch":     {"versions:\n  - name: platform_crds_version\n    version: main\n", ""},
+		"missing":    {"versions:\n  - name: codespace_version\n    version: v1.0.0\n", ""},
+		"duplicated": {"versions:\n  - name: platform_crds_version\n    version: v0.1.6\n  - name: platform_crds_version\n    version: v0.1.7\n", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := writeRepo(t, map[string]string{"VERSIONS/glueops.yaml": tc.body})
-			if got := r.CRDsBundleEnabled(); got != tc.want {
-				t.Fatalf("got %v, want %v", got, tc.want)
+			got, err := r.PlatformCRDsPin()
+			if (err == nil) != (tc.want != "") || got != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
 			}
 		})
 	}
-	if (Repo{Dir: t.TempDir()}).CRDsBundleEnabled() {
-		t.Fatal("no VERSIONS file must not be on the bundle")
+	if _, err := (Repo{Dir: t.TempDir()}).PlatformCRDsPin(); err == nil {
+		t.Fatal("no VERSIONS file must be an error")
 	}
 }

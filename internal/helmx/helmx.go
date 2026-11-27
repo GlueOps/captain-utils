@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/databus23/helm-diff/v3/diff"
 	"github.com/databus23/helm-diff/v3/manifest"
 	"github.com/mgutz/ansi"
@@ -91,7 +90,11 @@ func New(kubeContext string, log io.Writer) *Client {
 
 func (c *Client) config(namespace string) (*action.Configuration, error) {
 	cfg := new(action.Configuration)
-	s := *c.Settings
+	// Not a copy of c.Settings: the REST getter keeps a pointer to the namespace field of the
+	// struct cli.New built it in, so SetNamespace on a copy would leave objects without a
+	// metadata.namespace in the kubeconfig's default namespace, not in the release's.
+	s := cli.New()
+	s.KubeContext, s.KubeConfig = c.Settings.KubeContext, c.Settings.KubeConfig
 	s.SetNamespace(namespace)
 	if err := cfg.Init(s.RESTClientGetter(), namespace, os.Getenv("HELM_DRIVER"), func(string, ...interface{}) {}); err != nil {
 		return nil, fmt.Errorf("helm: %w", err)
@@ -199,36 +202,6 @@ func (c *Client) RepoAdd(name, url string) error {
 	return nil
 }
 
-// ChartVersion is one index entry.
-type ChartVersion struct {
-	Version    string
-	AppVersion string
-}
-
-// SearchVersions lists the newest max stable versions of repoName/chartName
-// from the cached index, like `helm search repo repo/chart --versions`.
-func (c *Client) SearchVersions(repoName, chartName string, max int) ([]ChartVersion, error) {
-	idx, err := repo.LoadIndexFile(fmt.Sprintf("%s/%s-index.yaml", c.Settings.RepositoryCache, repoName))
-	if err != nil {
-		return nil, fmt.Errorf("helm repository %q index: %w (run a repo update)", repoName, err)
-	}
-	idx.SortEntries()
-	var out []ChartVersion
-	for _, cv := range idx.Entries[chartName] {
-		if v, err := semver.NewVersion(cv.Version); err != nil || v.Prerelease() != "" {
-			continue
-		}
-		out = append(out, ChartVersion{Version: cv.Version, AppVersion: cv.AppVersion})
-		if max > 0 && len(out) == max {
-			break
-		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no versions of %s/%s in the repository index", repoName, chartName)
-	}
-	return out, nil
-}
-
 func (c *Client) loadChart(r Release, opts *action.ChartPathOptions) (*chart.Chart, error) {
 	opts.Version = r.Version
 	path, err := opts.LocateChart(r.Chart, c.Settings)
@@ -263,6 +236,15 @@ func exists(cfg *action.Configuration, name string) (bool, error) {
 		return false, err
 	}
 	return len(versions) > 0 && versions[len(versions)-1].Info.Status != release.StatusUninstalled, nil
+}
+
+// ReleaseExists reports whether the release is installed (has a revision that is not uninstalled).
+func (c *Client) ReleaseExists(ctx context.Context, r Release) (bool, error) {
+	cfg, err := c.config(r.Namespace)
+	if err != nil {
+		return false, err
+	}
+	return exists(cfg, r.Name)
 }
 
 // DiffOptions control diff output.
@@ -389,6 +371,7 @@ func (c *Client) Upgrade(ctx context.Context, r Release) (*Result, error) {
 		up := action.NewUpgrade(cfg)
 		up.Install = true
 		up.Namespace = r.Namespace
+		up.MaxHistory = c.Settings.MaxHistory // as the helm CLI: keep 10 revisions, not unlimited
 		up.SkipCRDs = r.SkipCRDs
 		up.Description = r.Description
 		up.Timeout = DefaultTimeout

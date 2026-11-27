@@ -36,6 +36,14 @@ func (fakeCluster) DeleteDaemonSet(context.Context, string, string) (bool, error
 func (fakeCluster) Apply(_ context.Context, o *unstructured.Unstructured, _ kube.ApplyOptions) (*unstructured.Unstructured, error) {
 	return o, nil
 }
+func (fakeCluster) ListCRDs(context.Context) ([]*unstructured.Unstructured, error) { return nil, nil }
+func (fakeCluster) RemoveCRDAnnotation(context.Context, string, string) error      { return nil }
+func (fakeCluster) MigrateCRDToSSA(context.Context, string, string) (bool, error)  { return false, nil }
+func (fakeCluster) RemoveCRDLabel(context.Context, string, string) error           { return nil }
+func (fakeCluster) WaitCRDsDeleted(context.Context, []string, time.Duration) error { return nil }
+func (fakeCluster) WaitCRDsEstablished(context.Context, []string, time.Duration) error {
+	return nil
+}
 func (fakeCluster) Pods(context.Context, time.Time) ([]kube.PodRow, error) {
 	return []kube.PodRow{
 		{Namespace: "glueops-core", Name: "ok", Ready: "1/1", Status: "Running", Age: "1d"},
@@ -86,16 +94,16 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-func TestBadEnv(t *testing.T) {
-	code, _, errs := run(t, nil, map[string]string{"environment": "staging"}, "version")
-	if code != 1 || !strings.Contains(errs, "--env must be") {
-		t.Fatalf("%d %q", code, errs)
+// There is no dev mode: a leftover environment variable is ignored, a leftover --env is a usage error.
+func TestNoDevMode(t *testing.T) {
+	for _, env := range []string{"environment", "CAPTAIN_UTILS_ENV"} {
+		code, _, errs := run(t, nil, map[string]string{env: "dev"}, "version")
+		if code != 0 {
+			t.Fatalf("%s=dev: %d %q", env, code, errs)
+		}
 	}
-}
-
-func TestEnvFlagBeatsEnvironmentVariable(t *testing.T) {
-	code, _, errs := run(t, nil, map[string]string{"environment": "staging"}, "--env", "dev", "version")
-	if code != 0 {
+	code, _, errs := run(t, nil, nil, "--env", "dev", "version")
+	if code != 2 || !strings.Contains(errs, "unknown flag: --env") {
 		t.Fatalf("%d %q", code, errs)
 	}
 }
@@ -195,7 +203,7 @@ func TestPodsWatchOnce(t *testing.T) {
 
 func TestPlatformFlagsExclusive(t *testing.T) {
 	code, _, errs := run(t, fakeCluster{}, nil, "platform", "upgrade", "--version", "v1", "--chart-dir", "/x")
-	if code != 1 || !strings.Contains(errs, "none of the others can be") {
+	if code != 2 || !strings.Contains(errs, "none of the others can be") {
 		t.Fatalf("%d %q", code, errs)
 	}
 }

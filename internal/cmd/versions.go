@@ -29,21 +29,30 @@ terraform.tfstate (EKS addons). Rows whose source is missing are left out
 with a note. Read-only: unlike the old helper it never rewrites main.tf.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if output == "text" { // the name the other commands use for the human form
+				output = "table"
+			}
 			if output != "table" && output != "csv" && output != "json" {
-				return fmt.Errorf("-o must be table, csv or json, got %q", output)
+				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("-o must be text, table, csv or json, got %q", output)}
 			}
 			cl, err := a.cluster()
 			if err != nil {
+				if output == "json" {
+					a.writeJSONError(err)
+				}
 				return err
 			}
 			rows, err := versions.Collect(cmd.Context(), a.repo(), cl, func(s string) { a.p.Note("%s", s) })
 			if err != nil {
+				if output == "json" {
+					a.writeJSONError(err)
+				}
 				return err
 			}
 			return a.writeVersions(output, rows)
 		},
 	}
-	diff.Flags().StringVarP(&output, "output", "o", "table", "table, csv or json")
+	diff.Flags().StringVarP(&output, "output", "o", "table", "text (or table), csv or json")
 	c.AddCommand(diff)
 	return c
 }

@@ -47,6 +47,9 @@ func RESTConfig(kubeContext, userAgent string) (*rest.Config, error) {
 	}
 	cfg.UserAgent = userAgent
 	cfg.Timeout = 30 * time.Second
+	// client-go defaults to 5 QPS / burst 10, which throttles the crds flows (one dry-run apply per CRD,
+	// ~90 of them) to ~20s of idle waiting; kubectl itself runs at 50 / 100 or more.
+	cfg.QPS, cfg.Burst = 50, 100
 	return cfg, nil
 }
 
