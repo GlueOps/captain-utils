@@ -23,6 +23,7 @@ type fakeHelm struct {
 	diffErr   error
 	upErr     error
 	updateErr error
+	absent    bool // the release is not installed yet
 }
 
 func (f *fakeHelm) RepoUpdate(_ context.Context, names ...string) error {
@@ -38,12 +39,15 @@ func (f *fakeHelm) Diff(_ context.Context, r helmx.Release, _ helmx.DiffOptions,
 	fmt.Fprintln(w, "glueops-core, x, ConfigMap (v1) has changed:")
 	return f.changed, f.diffErr
 }
+func (f *fakeHelm) ReleaseExists(context.Context, helmx.Release) (bool, error) {
+	return !f.absent, nil
+}
 func (f *fakeHelm) Upgrade(_ context.Context, r helmx.Release) (*helmx.Result, error) {
 	f.calls = append(f.calls, "upgrade "+strings.TrimPrefix(r.Command(), "helm upgrade --install "))
 	if f.upErr != nil {
 		return nil, f.upErr
 	}
-	return &helmx.Result{Name: r.Name, Namespace: r.Namespace, Status: "deployed", Revision: 2}, nil
+	return &helmx.Result{Name: r.Name, Namespace: r.Namespace, Status: "deployed", Revision: 2, Installed: f.absent}, nil
 }
 
 type fakeKube struct {
@@ -100,8 +104,6 @@ func newHarness(t *testing.T, files map[string]string, answers ...string) *harne
 	return h
 }
 
-func (h *harness) path(p string) string { return filepath.Join(h.d.Repo.Dir, p) }
-
 func (h *harness) want(t *testing.T, got []string, want ...string) {
 	t.Helper()
 	g := strings.Join(got, "\n")
@@ -128,8 +130,8 @@ func TestPlatformPinnedNoOverrides(t *testing.T) {
 	if !strings.Contains(h.errs.String(), "No Overrides.yaml detected") || len(h.prompt.Paged) != 1 {
 		t.Fatalf("stderr %q paged %d", h.errs.String(), len(h.prompt.Paged))
 	}
-	if !strings.Contains(h.out.String(), "chosen version: v0.85.0 for glueops-platform/glueops-platform") {
-		t.Fatalf("out %q", h.out.String())
+	if !strings.Contains(h.errs.String(), "chosen version: v0.85.0 for glueops-platform/glueops-platform") || strings.Contains(h.out.String(), "chosen version") {
+		t.Fatalf("out %q err %q", h.out.String(), h.errs.String())
 	}
 }
 
@@ -161,9 +163,9 @@ func TestPlatformNoTerminalNeedsFlags(t *testing.T) {
 	if !errors.Is(err, ui.ErrNoTerminal) || !errors.Is(err, ui.ErrUsage) || !strings.Contains(err.Error(), "--version") || len(h.helm.calls) != 0 {
 		t.Fatalf("no --version without a terminal is a usage error that changes nothing: %v %v", err, h.helm.calls)
 	}
-	// with --version and no --yes: refuses at the confirm, after the diff
+	// with --version and no --yes: a usage error at the confirm, after the diff
 	err = Platform(context.Background(), h.d, PlatformOptions{Version: "v0.85.0"}, h.out)
-	if !errors.Is(err, ui.ErrNoTerminal) || errors.Is(err, ui.ErrUsage) || !strings.Contains(err.Error(), "--yes") {
+	if !errors.Is(err, ui.ErrNoTerminal) || !errors.Is(err, ui.ErrUsage) || !strings.Contains(err.Error(), "--yes") {
 		t.Fatalf("%v", err)
 	}
 	h.d.Yes = true
@@ -325,6 +327,48 @@ func TestCalicoShowsTheDiffBeforeItConfirms(t *testing.T) {
 		"upgrade calico projectcalico/tigera-operator --version v3.31.4 -f $DIR/calico.yaml -n tigera-operator --create-namespace",
 	)
 	if len(h.prompt.Paged) != 1 || len(h.prompt.Asked) != 1 || h.prompt.Asked[0] != "CONFIRM Remove the aws-node daemonset (kube-system) and apply this calico v3.31.4 upgrade?" {
+		t.Fatalf("paged %d asked %v", len(h.prompt.Paged), h.prompt.Asked)
+	}
+}
+
+// -o json action: installed for a first install, upgraded for an existing release, failed once the
+// upgrade was attempted and errored (nothing says "none" after helm ran).
+func TestResultActionInstalledUpgradedFailed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		absent bool
+		upErr  error
+		want   string
+	}{
+		"installed": {absent: true, want: ActionInstalled},
+		"upgraded":  {want: ActionUpgraded},
+		"failed":    {upErr: errors.New("boom"), want: ActionFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil)
+			h.helm.absent, h.helm.upErr = tc.absent, tc.upErr
+			h.d.Yes, h.d.Result = true, NewResult()
+			_ = Argocd(context.Background(), h.d, ArgocdOptions{Version: "9.3.7"}, h.out)
+			if h.d.Result.Action != tc.want {
+				t.Fatalf("action %q, want %q", h.d.Result.Action, tc.want)
+			}
+		})
+	}
+}
+
+// A first install has no release to diff against, and validating the render fails before the
+// chart's own crds/ exist: no diff, the confirm says install, and the install still runs.
+func TestCalicoFirstInstallSkipsTheDiff(t *testing.T) {
+	h := newHarness(t, nil, "yes")
+	h.helm.absent = true
+	if err := Calico(context.Background(), h.d, h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.want(t, h.helm.calls,
+		"repo add projectcalico https://docs.tigera.io/calico/charts",
+		"repo update projectcalico",
+		"upgrade calico projectcalico/tigera-operator --version v3.31.4 -f $DIR/calico.yaml -n tigera-operator --create-namespace",
+	)
+	if len(h.prompt.Paged) != 0 || len(h.prompt.Asked) != 1 || h.prompt.Asked[0] != "CONFIRM Remove the aws-node daemonset (kube-system) and apply this calico v3.31.4 install?" {
 		t.Fatalf("paged %d asked %v", len(h.prompt.Paged), h.prompt.Asked)
 	}
 }

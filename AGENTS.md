@@ -47,6 +47,9 @@ There is no dev mode: no `--env`, no dev menu. Everything runs the way productio
 - CI: gofmt, `go mod tidy` diff, vet, build, `go test -race`. Actions pinned by SHA.
 - Conventional Commits, release-please friendly.
 
+Scripted use (which commands change things, the flags each needs without a terminal, recovery after
+a failed step) is in README "Scripting and agents": keep it in step with the commands.
+
 ## Decisions
 
 Settled in review; do not re-raise.

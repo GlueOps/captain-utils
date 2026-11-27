@@ -43,7 +43,7 @@ func notEstablished(live []*unstructured.Unstructured) []string {
 	return out
 }
 
-// argoTracked names the CRDs carrying ArgoCD tracking metadata.
+// argoTrackedAnnotation names the CRDs carrying the ArgoCD tracking-id annotation.
 func argoTrackedAnnotation(live []*unstructured.Unstructured) []string {
 	var out []string
 	for _, o := range live {

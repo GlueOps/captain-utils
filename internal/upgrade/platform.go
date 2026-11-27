@@ -67,7 +67,7 @@ func Platform(ctx context.Context, d *Deps, o PlatformOptions, out io.Writer) er
 		}
 		version = choice
 	}
-	fmt.Fprintf(out, "chosen version: %s for %s\n", version, PlatformChart)
+	d.P.Info("chosen version: %s for %s", version, PlatformChart)
 
 	if err := d.Helm.RepoUpdate(ctx, PlatformRepo); err != nil {
 		return err

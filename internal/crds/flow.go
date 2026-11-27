@@ -143,8 +143,6 @@ func (d *Deps) diff(ctx context.Context, b *bundle, live []*unstructured.Unstruc
 	return res, nil
 }
 
-func count(s []string) int { return len(s) }
-
 // plan is everything this run will do, printed before the confirm and
 // unconditionally: the no-diff branch has no confirm yet still strips ArgoCD
 // tracking, so a plan inside the changed branch would hide precisely the run
@@ -161,9 +159,9 @@ func (d *Deps) plan(version string, b *bundle, live []*unstructured.Unstructured
 		return // check changes nothing: strip, wait and keep describe an apply
 	}
 	if n := csaManaged(live); n > 0 {
-		fmt.Fprintf(d.Out, "  migrate: client-side-apply ownership of %d CRD(s) moves to %s (last-applied-configuration is dropped; the diff above does not show it)\n", n, FieldManager)
+		fmt.Fprintf(d.Out, "  migrate: client-side-apply ownership of %d CRD(s) moves to %s (last-applied-configuration is dropped; the diff above does not show it). Labels and annotations the bundle does not declare that a client-side apply set (helm.sh/chart, cert-manager inject-ca-from, spec.conversion) are DROPPED by this migration\n", n, FieldManager)
 	}
-	fmt.Fprintf(d.Out, "  strip:  ArgoCD tracking-id from %d, instance label from %d\n", count(ann), count(lab))
+	fmt.Fprintf(d.Out, "  strip:  ArgoCD tracking-id from %d, instance label from %d\n", len(ann), len(lab))
 	// An observation, not a promise: the documented crds -> argocd -> crds order means
 	// the argocd release is itself what creates a terminating CRD.
 	if len(dying) > 0 {
@@ -171,16 +169,13 @@ func (d *Deps) plan(version string, b *bundle, live []*unstructured.Unstructured
 	} else {
 		fmt.Fprintln(d.Out, "  wait:   none terminating right now — re-checked after you confirm, a wait may still follow")
 	}
-	fmt.Fprintln(d.Out, "  keep:   chart labels an earlier installer set are NOT removed (the bundle never declares them)")
+	fmt.Fprintln(d.Out, "  keep:   fields an earlier installer set are not removed by the apply itself, except those owned through client-side apply (see migrate)")
 }
 
-// clearance is the token doApply demands. Only clear makes one, and it is bound
-// to the snapshot it cleared: a deleted guard call does not compile, a stale
-// snapshot is rejected.
-type clearance struct {
-	ok   bool
-	live []*unstructured.Unstructured
-}
+// clearance is the token doApply demands. Only clear makes ok true, and doApply refuses to run
+// without it at run time (a test guards that). It does not bind to a snapshot and the compiler
+// does not enforce it: clearance{} compiles anywhere in the package.
+type clearance struct{ ok bool }
 
 // clear is the mutating pre-apply sequence: strip stray ArgoCD tracking metadata
 // (a tracked CRD would be auto-pruned once it leaves an app's desired state)
@@ -216,7 +211,7 @@ func (d *Deps) clear(ctx context.Context, live []*unstructured.Unstructured) (cl
 			return clearance{}, fmt.Errorf("waiting for terminating CRDs — the bundle was NOT applied: %w", err)
 		}
 	}
-	return clearance{ok: true, live: live}, nil
+	return clearance{ok: true}, nil
 }
 
 // doApply is the only mutating Apply in this package, and it cannot run without
@@ -227,6 +222,9 @@ func (d *Deps) doApply(ctx context.Context, b *bundle, c clearance) (failed []Fa
 	}
 	d.P.Note("+ server-side apply of %d CRDs (force-conflicts, field manager %s)", b.total(), FieldManager)
 	for _, obj := range b.objs {
+		if ctx.Err() != nil {
+			break // cancelled (Ctrl-C / SIGTERM): stop here instead of listing every remaining CRD as failed
+		}
 		// what kubectl apply --server-side does first: hand client-side-apply ownership (and with
 		// it the last-applied annotation) over to our manager, so the apply below can drop them
 		if _, err := d.Cluster.MigrateCRDToSSA(ctx, obj.GetName(), FieldManager); err != nil {
@@ -240,25 +238,8 @@ func (d *Deps) doApply(ctx context.Context, b *bundle, c clearance) (failed []Fa
 	return failed
 }
 
-// confirm asks title; only the --yes flag answers for the operator. No (or Esc) is
-// ui.ErrDeclined, so a declined run is not mistaken for an applied one.
-func (d *Deps) confirm(title string) error {
-	if d.Yes {
-		d.P.Note("%s yes (--yes)", title)
-		return nil
-	}
-	if !d.Prompt.Interactive() {
-		return fmt.Errorf("%s: %w (pass --yes to run without one)", title, ui.ErrNoTerminal)
-	}
-	ok, err := d.Prompt.Confirm(title)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ui.ErrDeclined
-	}
-	return nil
-}
+// confirm asks title; only the --yes flag answers for the operator (see ui.Confirm).
+func (d *Deps) confirm(title string) error { return ui.Confirm(d.Prompt, d.P, d.Yes, title) }
 
 func (d *Deps) preflight(ctx context.Context, b *bundle) ([]*unstructured.Unstructured, error) {
 	live, err := readLive(ctx, d.Cluster, b)
@@ -302,7 +283,7 @@ func (d *Deps) resolveApply(o Options) (t target, ok bool, err error) {
 	case o.ChartDir != "":
 		return d.localTarget(o.ChartDir, true)
 	case o.Version != "":
-		return target{version: o.Version}, true, validVersion(o.Version)
+		return target{version: o.Version}, true, validVersion(o.Version, true)
 	case !d.Prompt.Interactive():
 		return t, false, errNeedVersion()
 	}
@@ -324,7 +305,7 @@ func (d *Deps) resolveApply(o Options) (t target, ok bool, err error) {
 		}
 		return d.localTarget(dir, true)
 	}
-	return target{version: choice}, true, validVersion(choice)
+	return target{version: choice}, true, validVersion(choice, false)
 }
 
 // errNeedVersion is the usage error of a run with no terminal and no --version / --chart-dir.
@@ -435,6 +416,10 @@ func ApplyResult(ctx context.Context, d *Deps, o Options) (*Result, error) {
 	}
 	failed := d.doApply(ctx, b, c)
 	res.Failed = append(res.Failed, failed...)
+	if err := ctx.Err(); err != nil {
+		// CRDs after the break were not touched, so do not settle them as applied; keep the cancellation visible to Execute (exit 130) rather than flattening it to text
+		return res, fmt.Errorf("interrupted during the CRD apply (%d failed so far; re-run crds apply): %w", len(failed), err)
+	}
 	res.settle(b.names, df.Names, failedNames(failed))
 	if len(failed) > 0 {
 		return res, fmt.Errorf("CRD apply failed (%d of %d): %s", len(failed), b.total(), failureText(failed))
@@ -509,7 +494,7 @@ func CheckResult(ctx context.Context, d *Deps, o Options) (*CheckReport, error) 
 		t = target{version: v}
 	}
 	if t.dir == "" {
-		if err := validVersion(t.version); err != nil {
+		if err := validVersion(t.version, o.Version != ""); err != nil {
 			return nil, err
 		}
 	}

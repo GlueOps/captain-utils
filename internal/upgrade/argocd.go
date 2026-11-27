@@ -2,7 +2,6 @@ package upgrade
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/glueops/captain-utils/internal/captain"
@@ -49,7 +48,7 @@ func Argocd(ctx context.Context, d *Deps, o ArgocdOptions, out io.Writer) error 
 	if err := d.Helm.RepoUpdate(ctx, ArgocdRepo); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "chosen version: %s for %s\n", version, ArgocdChart)
+	d.P.Info("chosen version: %s for %s", version, ArgocdChart)
 	d.P.Info("ArgoCD CRDs are managed by the platform-crds bundle (menu item crds) — not applied by this step.")
 
 	r := helmx.Release{

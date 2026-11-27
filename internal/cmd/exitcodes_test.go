@@ -23,6 +23,7 @@ func (stubHelm) Diff(_ context.Context, _ helmx.Release, _ helmx.DiffOptions, w 
 	_, _ = io.WriteString(w, "changed\n")
 	return true, nil
 }
+func (stubHelm) ReleaseExists(context.Context, helmx.Release) (bool, error) { return true, nil }
 func (s stubHelm) Upgrade(_ context.Context, r helmx.Release) (*helmx.Result, error) {
 	*s.upgraded = true
 	return &helmx.Result{Name: r.Name, Namespace: r.Namespace, Status: "deployed", Revision: 2}, nil
@@ -68,6 +69,9 @@ func TestUsageErrorsExit2(t *testing.T) {
 		{"bogus"},
 		{"aws", "calico", "bogus"},
 		{"crds", "apply", "-o", "yaml"},
+		{"platform", "diff", "-o", "yaml"},
+		{"pods", "list", "-o", "yaml"},
+		{"versions", "diff", "-o", "yaml"},
 	} {
 		if code, out, errs, _ := runCLI(t, dir, nil, true, args...); code != 2 || out != "" || errs == "" {
 			t.Errorf("%v: exit %d out %q err %q, want exit 2", args, code, out, errs)
@@ -148,7 +152,7 @@ func TestApprovalEnvironmentVariablesDoNotApprove(t *testing.T) {
 		}
 		// ... and without one it refuses
 		code, _, errs, up = runCLI(t, dir, nil, false, args...)
-		if code != 1 || up || !strings.Contains(errs, "pass --yes") {
+		if code != ExitUsage || up || !strings.Contains(errs, "pass --yes") {
 			t.Errorf("%v without a terminal: exit %d upgraded %v %q", args, code, up, errs)
 		}
 	}

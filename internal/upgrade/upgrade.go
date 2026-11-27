@@ -7,7 +7,6 @@ package upgrade
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -22,6 +21,7 @@ type Helm interface {
 	RepoUpdate(ctx context.Context, names ...string) error
 	RepoAdd(name, url string) error
 	Diff(ctx context.Context, r helmx.Release, opts helmx.DiffOptions, w io.Writer) (bool, error)
+	ReleaseExists(ctx context.Context, r helmx.Release) (bool, error)
 	Upgrade(ctx context.Context, r helmx.Release) (*helmx.Result, error)
 }
 
@@ -55,30 +55,10 @@ func errNeedFlag(what, flag string) error {
 	return ui.Usage(fmt.Errorf("no terminal to %s on: %w (pass %s)", what, ui.ErrNoTerminal, flag))
 }
 
-// confirm asks title; no (or Esc) is ui.ErrDeclined, so a flow that was declined is not
-// mistaken for one that ran. Only the --yes flag answers for the operator.
-func (d *Deps) confirm(title string) error {
-	if d.Yes {
-		d.P.Note("%s yes (--yes)", title)
-		return nil
-	}
-	if !d.Prompt.Interactive() {
-		return fmt.Errorf("%s: %w (pass --yes to run without one)", title, ui.ErrNoTerminal)
-	}
-	ok, err := d.Prompt.Confirm(title)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ui.ErrDeclined
-	}
-	return nil
-}
+// confirm asks title; only the --yes flag answers for the operator (see ui.Confirm).
+func (d *Deps) confirm(title string) error { return ui.Confirm(d.Prompt, d.P, d.Yes, title) }
 
 func (d *Deps) choose(title, flag string, options ...string) (string, error) {
-	if !d.Prompt.Interactive() {
-		return "", errNeedFlag("choose", flag)
-	}
 	return d.Prompt.Choose(title, options...)
 }
 
@@ -101,9 +81,14 @@ func (d *Deps) showDiff(ctx context.Context, r helmx.Release, diffOnly bool, out
 	}
 	switch {
 	case d.Result != nil:
-		// -o json: the diff is in the result, nothing to print or page
+		// -o json: the diff is in the result, nothing to page. But an operator who is about to be
+		// asked sees it on stderr (out), or the confirm would be answered blind.
 		if !changed {
 			d.P.Note("helm diff: no changes for %s in %s", r.Name, r.Namespace)
+		} else if !diffOnly && !d.Yes && d.Prompt.Interactive() {
+			if _, err := out.Write(buf.Bytes()); err != nil {
+				return err
+			}
 		}
 	case !changed:
 		d.P.Note("helm diff: no changes for %s in %s", r.Name, r.Namespace)
@@ -126,6 +111,9 @@ func (d *Deps) upgrade(ctx context.Context, r helmx.Release, out io.Writer) erro
 	d.Result.release(r)
 	res, err := d.Helm.Upgrade(ctx, r)
 	if err != nil {
+		if d.Result != nil {
+			d.Result.Action = ActionFailed // the upgrade was attempted: the release may be half-changed
+		}
 		return err
 	}
 	verb := ActionUpgraded
@@ -141,6 +129,3 @@ func (d *Deps) upgrade(ctx context.Context, r helmx.Release, out io.Writer) erro
 	}
 	return nil
 }
-
-// ErrBack means the operator backed out; callers treat it as success.
-var ErrBack = errors.New("back")

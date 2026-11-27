@@ -51,8 +51,8 @@ func (a *App) deps(diffOnly bool) (*upgrade.Deps, error) {
 // (unless noDiff), and a failure, a usage error or a declined confirm is also written there
 // (with "error"), besides the exit code and the message on stderr.
 func (a *App) runFlow(output string, noDiff, diffOnly bool, flow func(d *upgrade.Deps, out io.Writer) error) error {
-	if output != "text" && output != "json" {
-		return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", output)}
+	if err := checkFormat(output); err != nil {
+		return err
 	}
 	if noDiff && output != "json" {
 		return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--no-diff only applies to -o json")}
@@ -199,7 +199,7 @@ func (a *App) podsCmd() *cobra.Command {
 		Use:   "watch",
 		Short: "Refresh the list of unhealthy pods until Ctrl-C",
 		Long: "Lists every pod whose status contains " + strings.Join(kube.UnhealthyStatuses, ", ") +
-			"\n(as `watch kubectl get pods -A | grep ...` did), refreshed every --interval.",
+			"\n(as `watch kubectl get pods -A | grep ...` did), refreshed every --interval.\nIt never returns on its own: scripts use --once or `pods list` for one snapshot.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := a.cluster()
@@ -221,11 +221,14 @@ func (a *App) podsCmd() *cobra.Command {
 			".\nWith -o json stdout is a JSON array of {namespace, name, ready, status, restarts, age} ([] when none).",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if output != "text" && output != "json" {
-				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", output)}
+			if err := checkFormat(output); err != nil {
+				return err
 			}
 			cl, err := a.cluster()
 			if err != nil {
+				if output == "json" {
+					a.writeJSONError(err)
+				}
 				return err
 			}
 			if output == "text" {
@@ -233,6 +236,7 @@ func (a *App) podsCmd() *cobra.Command {
 			}
 			rows, err := cl.Pods(cmd.Context(), time.Now())
 			if err != nil {
+				a.writeJSONError(err)
 				return err
 			}
 			out := []kube.PodRow{}
@@ -267,6 +271,9 @@ func (a *App) watchPods(ctx context.Context, cl Cluster, interval time.Duration,
 			fmt.Fprintf(a.Out, "Every %s: pods %s    %s\n\n", interval, strings.Join(kube.UnhealthyStatuses, "|"), now.Format(time.RFC1123))
 		}
 		if err != nil {
+			if once {
+				return err // a snapshot's failure is stderr's (Execute prints it), not stdout's
+			}
 			fmt.Fprintf(a.Out, "%v\n", err)
 		} else {
 			fmt.Fprintln(a.Out, kube.PodHeader)

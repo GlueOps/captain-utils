@@ -238,6 +238,15 @@ func exists(cfg *action.Configuration, name string) (bool, error) {
 	return len(versions) > 0 && versions[len(versions)-1].Info.Status != release.StatusUninstalled, nil
 }
 
+// ReleaseExists reports whether the release is installed (has a revision that is not uninstalled).
+func (c *Client) ReleaseExists(ctx context.Context, r Release) (bool, error) {
+	cfg, err := c.config(r.Namespace)
+	if err != nil {
+		return false, err
+	}
+	return exists(cfg, r.Name)
+}
+
 // DiffOptions control diff output.
 type DiffOptions struct {
 	Color bool
@@ -362,6 +371,7 @@ func (c *Client) Upgrade(ctx context.Context, r Release) (*Result, error) {
 		up := action.NewUpgrade(cfg)
 		up.Install = true
 		up.Namespace = r.Namespace
+		up.MaxHistory = c.Settings.MaxHistory // as the helm CLI: keep 10 revisions, not unlimited
 		up.SkipCRDs = r.SkipCRDs
 		up.Description = r.Description
 		up.Timeout = DefaultTimeout

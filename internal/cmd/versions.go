@@ -37,10 +37,16 @@ with a note. Read-only: unlike the old helper it never rewrites main.tf.`,
 			}
 			cl, err := a.cluster()
 			if err != nil {
+				if output == "json" {
+					a.writeJSONError(err)
+				}
 				return err
 			}
 			rows, err := versions.Collect(cmd.Context(), a.repo(), cl, func(s string) { a.p.Note("%s", s) })
 			if err != nil {
+				if output == "json" {
+					a.writeJSONError(err)
+				}
 				return err
 			}
 			return a.writeVersions(output, rows)

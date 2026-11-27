@@ -73,7 +73,7 @@ func TestCRDsApplyWithoutTerminalNeedsYes(t *testing.T) {
 	code, _, errs := runWith(t, func(a *App) {
 		a.Prompt = &noTerminal{}
 	}, "--captain-dir", dir, "crds", "apply", "--version", "v0.1.6")
-	if code != 1 || !strings.Contains(errs, "--yes") {
+	if code != ExitUsage || !strings.Contains(errs, "--yes") {
 		t.Fatalf("%d %q", code, errs)
 	}
 }
@@ -129,6 +129,29 @@ func TestCRDsWaitTimeoutEnvBareNumberIsSeconds(t *testing.T) {
 		if err != nil || d.Wait != want {
 			t.Fatalf("CRDS_WAIT_TIMEOUT=%q: %v %v, want %v", env, d, err, want)
 		}
+	}
+}
+
+// The flag takes a bare number of seconds like the variable, and a value that is neither a number
+// nor a duration is a usage error, not a silent 120s.
+func TestCRDsWaitTimeoutFlagAndInvalidValue(t *testing.T) {
+	for in, want := range map[string]time.Duration{"300": 300 * time.Second, "90s": 90 * time.Second} {
+		if got, err := waitTimeout(in); err != nil || got != want {
+			t.Errorf("%q: %v %v", in, got, err)
+		}
+	}
+	for _, in := range []string{"5min", "abc", "0", "-3"} {
+		if _, err := waitTimeout(in); err == nil {
+			t.Errorf("%q must be rejected", in)
+		}
+	}
+	code, _, errs := runCRDs(t, captainDir(t), "crds", "check", "--version", "v0.1.6", "--wait-timeout", "300")
+	if code == ExitUsage && strings.Contains(errs, "wait-timeout") {
+		t.Fatalf("a bare number must be accepted: %q", errs)
+	}
+	t.Setenv("CRDS_WAIT_TIMEOUT", "5min")
+	if code, _, errs = runCRDs(t, captainDir(t), "crds", "check", "--version", "v0.1.6"); code != ExitUsage || !strings.Contains(errs, "5min") {
+		t.Fatalf("%d %q", code, errs)
 	}
 }
 

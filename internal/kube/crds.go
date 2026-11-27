@@ -79,17 +79,35 @@ func (c *Client) pollCRDs(ctx context.Context, names []string, timeout time.Dura
 	}
 	pending := append([]string(nil), names...)
 	start := time.Now()
+	// One failed GET (a dropped connection, a 5xx) is retried on the next tick; only
+	// maxPollErrors in a row end the wait early, so a blip does not abort a 120s wait.
+	const maxPollErrors = 3
+	failures := 0
 	err = wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
 		var still []string
+		failed := false
 		for _, n := range pending {
 			u, err := ri.Get(ctx, n, metav1.GetOptions{})
 			ok, err := done(u, err)
 			if err != nil {
-				return false, err
+				if ctx.Err() != nil {
+					return false, err
+				}
+				failed = true
+				if failures+1 >= maxPollErrors {
+					return false, err
+				}
+				still = append(still, n)
+				continue
 			}
 			if !ok {
 				still = append(still, n)
 			}
+		}
+		if failed {
+			failures++
+		} else {
+			failures = 0
 		}
 		pending = still
 		return len(pending) == 0, nil

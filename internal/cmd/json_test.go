@@ -113,9 +113,9 @@ func TestUpgradeJSONDeclinedAndFailed(t *testing.T) {
 	if code != ExitDeclined || res.Action != upgrade.ActionDeclined || res.Error == "" || res.Release != "glueops-platform" {
 		t.Fatalf("declined: exit %d %+v", code, res)
 	}
-	// no --yes and no terminal: a failure (exit 1) with the reason in the result, nothing upgraded
+	// no --yes and no terminal: a usage error (exit 2) with the reason in the result, nothing upgraded
 	code, res, _, _ = runResult(t, dir, nil, false, "argocd", "upgrade", "--version", "9.3.7")
-	if code != 1 || res.Action != upgrade.ActionNone || !strings.Contains(res.Error, "--yes") {
+	if code != ExitUsage || res.Action != upgrade.ActionNone || !strings.Contains(res.Error, "--yes") {
 		t.Fatalf("failed: exit %d %+v", code, res)
 	}
 }
@@ -173,9 +173,9 @@ func TestCRDsApplyJSONErrorsAreInTheResult(t *testing.T) {
 	if code != ExitDeclined || res.Error == "" || len(res.Applied) != 0 || res.Version != "v0.1.6" || strings.Contains(out, "null") {
 		t.Errorf("declined: exit %d %+v", code, res)
 	}
-	// no terminal and no --yes: a failure, nothing applied
+	// no terminal and no --yes: a usage error, nothing applied
 	code, res, _, errs := runApplyJSON(t, dir, nil, false, "--version", "v0.1.6")
-	if code != 1 || !strings.Contains(res.Error, "--yes") || len(res.Applied) != 0 || !strings.Contains(errs, "--yes") {
+	if code != ExitUsage || !strings.Contains(res.Error, "--yes") || len(res.Applied) != 0 || !strings.Contains(errs, "--yes") {
 		t.Errorf("no --yes: exit %d %+v", code, res)
 	}
 	// usage: no --version and no terminal
@@ -201,6 +201,16 @@ func TestCRDsApplyJSONVerifyFailureKeepsWhatWasApplied(t *testing.T) {
 	}
 }
 
+// An early failure still carries every documented key (version, diff, status ...), never fewer.
+func TestUpgradeJSONAlwaysHasEveryKey(t *testing.T) {
+	_, _, out, _ := runResult(t, fullCaptain(t), nil, false, "argocd", "upgrade", "--version", "9.3.7")
+	for _, k := range []string{`"release"`, `"namespace"`, `"chart"`, `"version"`, `"action"`, `"changed"`, `"diff"`, `"diffLines"`, `"status"`, `"revision"`, `"notes"`, `"error"`} {
+		if !strings.Contains(out, k) {
+			t.Errorf("key %s missing from %s", k, out)
+		}
+	}
+}
+
 // --no-diff keeps the diff text out of the result; changed and diffLines still say what changed.
 func TestDiffJSONNoDiff(t *testing.T) {
 	dir := fullCaptain(t)
@@ -209,7 +219,7 @@ func TestDiffJSONNoDiff(t *testing.T) {
 		{"argocd", "diff", "--version", "9.3.7", "--no-diff"},
 	} {
 		code, res, out, _ := runResult(t, dir, nil, false, args...)
-		if code != 0 || res.Diff != "" || res.DiffLines != 1 || res.Changed == nil || !*res.Changed || strings.Contains(out, `"diff":`) {
+		if code != 0 || res.Diff != "" || res.DiffLines != 1 || res.Changed == nil || !*res.Changed || !strings.Contains(out, `"diff": ""`) {
 			t.Errorf("%v: exit %d %+v", args, code, res)
 		}
 	}

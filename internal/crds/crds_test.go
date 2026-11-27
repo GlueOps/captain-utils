@@ -563,6 +563,20 @@ func TestCheckInSyncReadsPinAndMutatesNothing(t *testing.T) {
 	}
 }
 
+// -o json's inSync is true exactly when the check passes: deleting that assignment must fail a test.
+func TestCheckResultInSyncIsTrueWhenNothingDrifts(t *testing.T) {
+	h := newHarness(t, nil, false)
+	h.syncLive()
+	rep, err := CheckResult(context.Background(), h.d, Options{Version: "v0.1.6"})
+	if err != nil || rep == nil || !rep.InSync || len(rep.Reasons) != 0 {
+		t.Fatalf("%v %+v", err, rep)
+	}
+	h = newHarness(t, nil, false) // nothing on the cluster: drift, not in sync
+	if rep, err = CheckResult(context.Background(), h.d, Options{Version: "v0.1.6"}); !errors.Is(err, ErrDrift) || rep == nil || rep.InSync {
+		t.Fatalf("%v %+v", err, rep)
+	}
+}
+
 func TestCheckDriftExitsWithErrDriftAndMutatesNothing(t *testing.T) {
 	h := newHarness(t, nil, false)
 	h.cl.put(h.src.manifest, func(o *unstructured.Unstructured) {

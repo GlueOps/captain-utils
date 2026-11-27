@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
@@ -87,7 +88,7 @@ func (a *App) child() *App {
 // itemContext is the context an item runs under: Ctrl-C cancels it and nothing else, so the
 // menu survives. The menu's own context is not used for cancellation (see menuCmd).
 func itemContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.WithoutCancel(ctx), os.Interrupt)
+	return signal.NotifyContext(context.WithoutCancel(ctx), os.Interrupt, syscall.SIGTERM)
 }
 
 // globalArgs are the settings every item inherits from the menu's command line.
@@ -214,7 +215,7 @@ func (m *menu) crds(ctx context.Context) {
 	}
 	// custom: apply the bundle from a local checkout of GlueOps/platform-crds (after hack/render.sh)
 	p.Alert("⚠️  custom applies UNRELEASED CRDs to this cluster. Nothing records it afterwards (same field manager as the pinned bundle) — the next pinned run's diff shows what it changed.")
-	fmt.Fprintln(p.Err, "Local platform-crds directory — a checkout of GlueOps/platform-crds with crds/ rendered (Tab completes, empty = back, Ctrl-C exits captain_utils):")
+	fmt.Fprintln(p.Err, "Local platform-crds directory — a checkout of GlueOps/platform-crds with crds/ rendered (Tab completes, empty = back, Ctrl-C returns to the menu):")
 	dir, err := m.a.Prompt.Path("path>", m.a.v.GetString("platform-chart-dir-prefill"))
 	if err != nil || dir == "" {
 		return
@@ -291,7 +292,12 @@ func (m *menu) appChartPreflight(ctx context.Context) {
 	}
 	ictx, stop := itemContext(ctx)
 	defer stop()
-	switch rc := m.preflight(ictx, bin, args); rc {
+	rc := m.preflight(ictx, bin, args)
+	if ictx.Err() != nil {
+		p.Warn("Preflight interrupted: no verdict.")
+		return
+	}
+	switch rc {
 	case 0:
 		if choice == "all" {
 			p.Plain("Preflight ok: bump only the sets under \"Safe to bump\" above to %s; sets under \"Not checked\" were not checked.", target)

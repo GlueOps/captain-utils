@@ -22,7 +22,7 @@ func (a *App) awsCmd() *cobra.Command {
 eks-addons, kubernetes and nodepools edit terraform/kubernetes/main.tf to the
 VERSIONS/aws.yaml pins: each prints the diff and writes main.tf (or only prints
 it with --dry-run). They change nothing on the cluster: review the diff,
-commit, and run terraform as usual.
+commit, and run tofu as usual.
 
 calico upgrade replaces the EKS VPC CNI with calico on the cluster.`,
 	}
@@ -171,7 +171,7 @@ func (a *App) editMainTF(res *awsResult, dryRun bool, edit func([]string) ([]str
 	if res != nil {
 		res.Written = true
 	}
-	a.p.Success("wrote %s (%d change(s)); review, commit, then terraform plan/apply", path, len(changes))
+	a.p.Success("wrote %s (%d change(s)); review, commit, then tofu plan/apply", path, len(changes))
 	return nil
 }
 

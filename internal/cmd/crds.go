@@ -17,6 +17,10 @@ import (
 // crdsDeps builds the crds flows' dependencies.
 func (a *App) crdsDeps() (*crds.Deps, error) {
 	o := a.opts()
+	wait, err := waitTimeout(a.v.GetString("crds-wait-timeout"))
+	if err != nil {
+		return nil, ui.Usage(err)
+	}
 	cl, err := a.cluster()
 	if err != nil {
 		return nil, err
@@ -31,21 +35,28 @@ func (a *App) crdsDeps() (*crds.Deps, error) {
 		Yes:         o.Yes,
 		Paged:       ui.IsTerminal(a.Out),
 		Chart:       a.v.GetString("crds-chart"),
-		Wait:        waitTimeout(a.v.GetString("crds-wait-timeout")),
+		Wait:        wait,
 		GitInfo:     gitinfo.Describe,
 		PathPrefill: a.v.GetString("platform-chart-dir-prefill"),
 	}, nil
 }
 
 // waitTimeout reads --wait-timeout / CRDS_WAIT_TIMEOUT. The bash command took bare seconds
-// ("300"); a Go duration ("90s", "2m") works too. Unset or unparsable gives 0, so Deps uses its default.
-func waitTimeout(s string) time.Duration {
+// ("300"); a Go duration ("90s", "2m") works too. Unset gives the default (120s); a value
+// that is neither is a usage error rather than a silent 120s.
+func waitTimeout(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
-	if n, err := strconv.Atoi(s); err == nil {
-		return time.Duration(n) * time.Second
+	if s == "" {
+		return crds.DefaultWait, nil
 	}
-	d, _ := time.ParseDuration(s)
-	return d
+	if n, err := strconv.Atoi(s); err == nil && n > 0 {
+		return time.Duration(n) * time.Second, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("--wait-timeout / CRDS_WAIT_TIMEOUT must be seconds (300) or a duration (90s, 2m), got %q", s)
+	}
+	return d, nil
 }
 
 func (a *App) crdsCmd() *cobra.Command {
@@ -70,7 +81,7 @@ orphans the custom resources of a terminating CRD.`,
 	}
 	pf := c.PersistentFlags()
 	pf.String("chart", "", "bundle chart reference override (default oci://ghcr.repo.gpkg.io/glueops/platform-crds); env: CRDS_CHART")
-	pf.Duration("wait-timeout", crds.DefaultWait, "how long to wait for terminating CRDs to go and new ones to be Established; env: CRDS_WAIT_TIMEOUT")
+	pf.String("wait-timeout", "", "how long to wait for terminating CRDs to go and new ones to be Established: seconds (300) or a duration (90s, 2m) (default 120s); env: CRDS_WAIT_TIMEOUT")
 	_ = a.v.BindPFlag("crds-chart", pf.Lookup("chart"))
 	_ = a.v.BindPFlag("crds-wait-timeout", pf.Lookup("wait-timeout"))
 	_ = a.v.BindEnv("crds-chart", "CRDS_CHART", "CAPTAIN_UTILS_CRDS_CHART")
@@ -90,8 +101,8 @@ orphans the custom resources of a terminating CRD.`,
 		Short: "Read-only: is the cluster in sync with the bundle? (exit 0 in sync, 1 drift, 2 failure or usage error)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if checkOutput != "text" && checkOutput != "json" {
-				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", checkOutput)}
+			if err := checkFormat(checkOutput); err != nil {
+				return err
 			}
 			d, err := a.crdsDeps()
 			if err == nil && checkOutput == "json" {
@@ -135,8 +146,8 @@ established}. With -o json the plan and diff go to stderr, so stdout is only the
 A declined confirm exits 3; a partial failure exits 1 with the failed CRDs in the result.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if output != "text" && output != "json" {
-				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", output)}
+			if err := checkFormat(output); err != nil {
+				return err
 			}
 			d, err := a.crdsDeps()
 			var res *crds.Result

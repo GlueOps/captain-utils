@@ -310,9 +310,9 @@ func TestMenuPreflightAllSetsAndOneSet(t *testing.T) {
 
 func TestMenuPreflightLooksAtTheSameClusterAsTheOtherItems(t *testing.T) {
 	r := newMenuRig(t, t.TempDir(), "app_chart_preflight", "0.18.0", "all", "Exit")
-	r.m.a.v.Set("kube-context", "k3d-venus")
+	r.m.a.v.Set("kube-context", "k3d-foobar")
 	r.run()
-	if len(r.pre) != 1 || strings.Join(r.pre[0], " ") != "app-chart-preflight --target 0.18.0 --context k3d-venus" {
+	if len(r.pre) != 1 || strings.Join(r.pre[0], " ") != "app-chart-preflight --target 0.18.0 --context k3d-foobar" {
 		t.Fatalf("%v", r.pre)
 	}
 }
@@ -341,11 +341,11 @@ func TestMenuPreflightBackOutsRunNothing(t *testing.T) {
 
 func TestMenuItemsInheritTheGlobalFlags(t *testing.T) {
 	r := newMenuRig(t, "/captain", "Exit")
-	r.m.a.v.Set("kube-context", "k3d-venus")
+	r.m.a.v.Set("kube-context", "k3d-foobar")
 	r.m.a.yes = true
 	r.m.a.v.Set("no-color", true)
 	got := strings.Join(r.m.globalArgs(), " ")
-	if got != "--captain-dir /captain --kube-context k3d-venus --yes --no-color" {
+	if got != "--captain-dir /captain --kube-context k3d-foobar --yes --no-color" {
 		t.Fatal(got)
 	}
 	got = strings.Join(newMenuRig(t, ".", "Exit").m.globalArgs(), " ")

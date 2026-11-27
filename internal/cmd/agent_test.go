@@ -81,7 +81,7 @@ func TestPodsListJSON(t *testing.T) {
 // -o text is the human form everywhere, versions diff included.
 func TestVersionsDiffAcceptsText(t *testing.T) {
 	dir := fullCaptain(t)
-	if code, out, errs := run(t, fakeCluster{}, nil, "versions", "diff", "-o", "text", "--captain-dir", dir); code != 0 && !strings.Contains(out, "Tool Name") {
+	if code, out, errs := run(t, fakeCluster{}, nil, "versions", "diff", "-o", "text", "--captain-dir", dir); code != 0 || !strings.Contains(out, "Tool Name") {
 		t.Fatalf("exit %d %q %q", code, out, errs)
 	}
 	if code, _, _ := run(t, fakeCluster{}, nil, "versions", "diff", "-o", "yaml", "--captain-dir", dir); code != ExitUsage {

@@ -157,8 +157,7 @@ captain_utils with no arguments) is the menu itself.`,
 	root.AddCommand(a.versionCmd(), a.versionsCmd(), a.awsCmd(), a.platformCmd(), a.argocdCmd(), a.crdsCmd(), a.podsCmd(), a.menuCmd())
 	rejectUnknownSubcommands(root)
 	// every error cobra raises before a command runs (unknown flag or command, a bad flag value,
-	// exclusive flags, wrong arguments) is a usage error: exit 2, never a command's own code
-	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return &ExitError{Code: ExitUsage, Err: err} })
+	// exclusive flags, wrong arguments) is a usage error: Execute maps it to exit 2 (a.running is false)
 	a.markRunning(root)
 	return root
 }
@@ -192,9 +191,6 @@ func (a *App) Execute(ctx context.Context, args []string) int {
 		if !ee.Silent && ee.Err != nil {
 			a.printer().Error("%v", ee.Err)
 		}
-		if ee.Code == ExitUsage && ee.Err != nil {
-			a.usageJSON(args, ee.Err)
-		}
 		return ee.Code
 	}
 	if errors.Is(err, ui.ErrDeclined) {
@@ -214,8 +210,22 @@ func (a *App) usageJSON(args []string, err error) {
 	if a.running || !wantsJSON(args) {
 		return
 	}
+	a.writeJSONError(err)
+}
+
+// writeJSONError is the object a -o json command prints on stdout when it fails without a
+// result of its own.
+func (a *App) writeJSONError(err error) {
 	b, _ := json.MarshalIndent(map[string]string{"error": err.Error()}, "", "  ")
 	fmt.Fprintln(a.Out, string(b))
+}
+
+// checkFormat is the -o text|json check every command with that flag makes.
+func checkFormat(output string) error {
+	if output != "text" && output != "json" {
+		return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--output must be text or json, got %q", output)}
+	}
+	return nil
 }
 
 func wantsJSON(args []string) bool {
@@ -229,6 +239,11 @@ func wantsJSON(args []string) bool {
 			}
 		case s == "-ojson" || s == "-o=json" || s == "--output=json":
 			return true
+		case strings.HasPrefix(s, "-") && !strings.HasPrefix(s, "--") && len(s) > 2:
+			// combined shorthand: -yo json, -yojson
+			if strings.HasSuffix(s, "ojson") || (strings.HasSuffix(s, "o") && i+1 < len(args) && args[i+1] == "json") {
+				return true
+			}
 		}
 	}
 	return false

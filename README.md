@@ -29,8 +29,8 @@ captain-utils menu                          # the interactive menu: opens on the
 captain_utils                               # the same: this binary installed under the old name (see below)
 ```
 
-The menu offers what the bash menu did, in the same order: `show_diff_table` (production),
-`crds`, `argocd`, `glueops-platform`, `app_chart_preflight`, `aws`, `inspect_pods` (production),
+The menu offers what the bash menu did, in the same order: `show_diff_table`,
+`crds`, `argocd`, `glueops-platform`, `app_chart_preflight`, `aws`, `inspect_pods`,
 `Exit`. Each item runs the subcommand of the same area, so `crds` in the menu is `crds apply`.
 Install this binary as `captain_utils` (`ln -s captain-utils /usr/local/bin/captain_utils`): run
 under that name with no arguments it opens the menu; with arguments it behaves as `captain-utils`.
@@ -87,7 +87,7 @@ pin (plus `custom` and `Back` where they exist).
 |---|---|
 | 0 | done, or nothing to do |
 | 1 | failed (including a partial `crds apply`); for `crds check`, drift |
-| 2 | usage error: unknown flag, subcommand or flag value, exclusive flags, a missing `--version` without a terminal (for `crds check` any failure is also 2) |
+| 2 | usage error: unknown flag, subcommand or flag value (an unusable `--version` or `--wait-timeout` included), exclusive flags, a missing `--version` or a missing `--yes` without a terminal (for `crds check` any failure is also 2) |
 | 3 | a confirmation was declined: nothing was changed (`crds apply`, `platform upgrade`, `argocd upgrade`, `aws calico upgrade`) |
 | 130 | interrupted |
 
@@ -103,21 +103,23 @@ Stdout is then one JSON object and nothing else (the plan, status and helm text 
 codes are unchanged. A failure or a declined confirm still prints the object, with `error` set, so a
 script reads one stream. That includes a usage error from the flow (for example a missing `--version`
 without a terminal): exit 2, the object with `error` set and no findings. Only a command line cobra
-rejects before the command runs (an unknown flag, `-o yaml`) prints no JSON, because the format is not known yet.
+rejects before the command runs prints `{"error": "..."}` when `-o json` is on the line (an unknown `-o` value such as `-o yaml` prints no JSON).
 Lists are always `[]`, never `null`.
 
 - `crds check`: `{"version", "inSync", "total", "new", "changed", "differs": [...], "terminating": [...],
   "notEstablished": [...], "notOwned": [...], "notOnCluster", "reasons": [...], "error"}`. `inSync` is true
   exactly when the exit code is 0. When the check itself failed, `error` is set and the lists are empty.
 - upgrades: `{"release", "namespace", "chart", "version", "action", "changed", "diff", "diffLines", "status",
-  "revision", "notes", "error"}`. `action` is `diff` (a diff command), `installed` or `upgraded`, `declined` (exit 3) or
-  `none` (stopped before the upgrade, see `error`). `changed` and `diff` are the helm diff, which -o json keeps
-  out of the pager; `diff` is empty when nothing changed. Run `diff -o json`, then `upgrade --yes -o json`.
+  "revision", "notes", "warnings", "error"}`; every key is always there (`changed` is `null` when the run stopped before the diff,
+  `warnings` is `[]` unless something went wrong without stopping the run, such as a failed `aws-node` delete). `action` is `diff` (a diff command), `installed` or `upgraded`, `declined` (exit 3) or
+  `failed` (the upgrade was started and failed: check the release, and for calico `aws-node` is already removed) or
+  `none` (nothing changed: stopped before the upgrade, see `error`). `changed` and `diff` are the helm diff, which -o json keeps
+  out of the pager; `diff` is empty when nothing changed. At a terminal without `--yes` the diff is also shown on stderr before the confirm. Run `diff -o json`, then `upgrade --yes -o json`.
   `--no-diff` (with `-o json` only; exit 2 otherwise) leaves the diff text out, which for the platform chart is
   about 160 KB: `changed` and `diffLines` still say whether and how much changed.
 
 The `aws` main.tf commands edit `terraform/kubernetes/main.tf` and nothing else: review
-the diff, commit, and run terraform as usual. They also accept the old menu
+the diff, commit, and run tofu as usual. They also accept the old menu
 names (`upgrade-kubernetes`, `upgrade-eks-nodepools`).
 
 ### Global flags
@@ -153,14 +155,19 @@ lines to stderr.
 ## Changes from the bash menu (phase 2)
 
 - No helm, helm-diff, kubectl, gh, gum, yq or jq: the Helm SDK (same settings,
-  repositories.yaml and cache as the CLI), client-go and the GitHub API.
+  repositories.yaml and cache as the CLI) and client-go.
   Verified on a k3d captain: `platform diff` and `argocd diff` are
   byte-identical to `helm diff upgrade` (a 3,378-line argo-cd diff included).
 - Only the repo a flow uses is refreshed (the menu ran `helm repo update` for
   every repo at startup).
 - The legacy ArgoCD CRD install is removed (see "Changes from the bash menu (phase 4)").
 - `aws calico upgrade` shows the helm diff of the calico release, then asks once before it
-  deletes the `aws-node` daemonset and installs.
+  deletes the `aws-node` daemonset and installs. A first install (no `calico` release yet) has no
+  diff to show: validating the render needs the chart's own CRDs, which only the install creates, so the
+  diff is skipped with a note and the confirm says "install".
+- Helm release history is capped at the helm CLI's default (10 revisions); it was unlimited.
+- The `chosen version:` line goes to stderr with the other status lines, so `platform diff` / `argocd diff`
+  print only the diff on stdout.
 - An empty diff says so instead of opening an empty pager.
 
 ## Changes from the bash menu (phase 4)
@@ -198,7 +205,7 @@ lines to stderr.
 - Subcommands and flags instead of positional arguments: `crds check [version]`
   is `crds check [--version V]`, `check-dir DIR` / `apply-dir DIR` are
   `--chart-dir DIR`. `CRDS_AUTO_CONFIRM` is removed: scripts pass `--yes`
-  (a variable left in a shell would silently apply CRDs). `CRDS_CHART` and `CRDS_WAIT_TIMEOUT` still work, as `--chart` / `--wait-timeout` (a bare number is seconds, as in bash; `90s` and `2m` work too).
+  (a variable left in a shell would silently apply CRDs). `CRDS_CHART` and `CRDS_WAIT_TIMEOUT` still work, as `--chart` / `--wait-timeout` (both take a bare number of seconds, as in bash, or `90s` / `2m`; a value that is neither is a usage error, exit 2, not a silent 120s).
 - No helm, kubectl, yq, jq or gum: the Helm SDK renders the bundle (`helm
   template --include-crds -f platform.yaml`, `helm show crds` for the "83 of 85"
   count), client-go lists, patches and waits.
@@ -210,6 +217,15 @@ lines to stderr.
   every failure is reported together.
 - Without a terminal, `check` and `apply` need `--version` or `--chart-dir` (exit 2 otherwise): bash
   `check` with no version read the pin. At a terminal `check` still reads the pin, and `apply` offers it.
+- The kube client runs at 50 QPS / burst 100 (client-go's default is 5 / 10), for every command: `crds` makes
+  about 90 sequential dry-run applies, which spent ~20s throttled.
+- A bundle that declares the same CRD twice is refused, before anything is applied.
+- The plan prints a `migrate:` line for CRDs an older installer applied client-side, and the diff cannot
+  show what it does: the migration hands every field of the old record to our manager, and the server-side
+  apply then **drops** the labels, annotations and `spec.conversion` the bundle does not declare
+  (for example `helm.sh/chart`, or cert-manager's `inject-ca-from`). `keep:` only promises that the apply
+  itself removes nothing it did not own.
+- A single failed GET while waiting for CRDs is retried; three in a row end the wait.
 - The menu's `target-version` is not a subcommand: `apply` resolves the version itself.
 - `check` reports **drift** (exit 1) while a bundle CRD is being deleted. A terminating CRD still
   has its spec, so its diff is clean and the bash `check` called it "in sync" (exit 0) even though
@@ -254,6 +270,33 @@ lines to stderr.
   An invalid `-o` value is a usage error (exit 2).
 - A command line cobra rejects before the command runs (an unknown flag, say) prints
   `{"error": "..."}` on stdout, exit 2, when `-o json` is on the line. Without `-o json` stdout stays empty.
+
+## Scripting and agents
+
+Without a terminal every prompt fails fast with a hint, data goes to stdout and status to stderr.
+
+| Command | Changes the cluster? | Without a terminal it needs |
+|---|---|---|
+| `versions diff`, `pods list`, `pods watch --once`, `crds check`, `platform diff`, `argocd diff` | no | `--version` or `--chart-dir` for the `crds`, `platform` and `argocd` ones |
+| `crds apply`, `platform upgrade`, `argocd upgrade` | yes | `--version` (or `--chart-dir`) and `--yes` |
+| `aws calico upgrade` | yes (deletes `aws-node`, installs calico) | `--yes` |
+| `aws eks-addons\|kubernetes\|nodepools` | edits `main.tf` / `VERSIONS/aws.yaml` in the captain repo (`--dry-run` to preview) | nothing |
+
+`pods watch` never returns without `--once`; use `pods list` for a snapshot. The whole production flow
+without parsing text: `crds check --version V -o json`, `crds apply --version V --yes -o json`,
+`argocd diff` / `argocd upgrade --version V --yes -o json`, `crds apply` again, `platform diff` /
+`platform upgrade --version V --yes -o json`. Exit codes are in the table above.
+
+### When a step fails or is interrupted
+
+- `crds apply` partly failed or was interrupted: the result names the CRDs that failed (`-o json`:
+  `failed`); CRDs after an interruption were not touched. Fix the cause and re-run `crds apply`; it is
+  idempotent, and `crds check` says what is still out of sync.
+- A helm upgrade failed (`"action": "failed"`): `helm status` / `helm history` on the release, then re-run the
+  same command. A `pending-*` status means a helm lock left by an interrupted run: `helm rollback` to the last
+  deployed revision (or wait for the other run to end) before re-running.
+- `aws calico upgrade` failed after `aws-node` was removed: the cluster has no CNI until calico is
+  installed, so re-run it (it skips the `aws-node` delete when it is already gone).
 
 ## Development
 

@@ -6,13 +6,13 @@
 //  1. CRDs are only ever server-side applied (force-conflicts, one field
 //     manager). Never replace or update: replace erased metadata.finalizers,
 //     destroying a terminating CRD and orphaning its custom resources.
-//  2. The one non-dry-run Apply is doApply, and it needs a clearance, a value
-//     only clear can produce, for the same live snapshot. Check never reaches
+//  2. The one non-dry-run Apply is doApply, and it refuses to run without a
+//     clearance (a run-time check; only clear sets it). Check never reaches
 //     either of them, so it cannot change the cluster.
 //  3. The plan block prints unconditionally, before the diff branch: the
 //     no-diff path has no confirm and still strips.
-//  4. Check exits 1 for drift only and 2 for any failure. Apply returns nil
-//     on decline.
+//  4. Check exits 1 for drift only and 2 for any failure. Apply returns the
+//     declined error (exit 3) on decline.
 //  5. The command writes only after an explicit yes (or --yes). A clean diff
 //     is not a licence to apply.
 package crds
@@ -31,6 +31,7 @@ import (
 	"github.com/glueops/captain-utils/internal/captain"
 	"github.com/glueops/captain-utils/internal/helmx"
 	"github.com/glueops/captain-utils/internal/kube"
+	"github.com/glueops/captain-utils/internal/ui"
 )
 
 // Defaults.
@@ -55,11 +56,16 @@ type bundle struct {
 func (b *bundle) total() int { return len(b.names) }
 
 // validVersion rejects empty or garbage: an empty --version makes helm pull LATEST.
-func validVersion(v string) error {
-	if !captain.IsReleaseTag(v) {
-		return fmt.Errorf("platform_crds_version must be a release tag vX.Y.Z (got '%s') — check VERSIONS/glueops.yaml", v)
+// fromFlag says the value was typed as --version (a usage error, exit 2); otherwise it came from
+// the VERSIONS/glueops.yaml pin.
+func validVersion(v string, fromFlag bool) error {
+	if captain.IsReleaseTag(v) {
+		return nil
 	}
-	return nil
+	if fromFlag {
+		return ui.Usage(fmt.Errorf("--version must be a release tag vX.Y.Z (got '%s')", v))
+	}
+	return fmt.Errorf("platform_crds_version must be a release tag vX.Y.Z (got '%s') — check VERSIONS/glueops.yaml", v)
 }
 
 // parseBundle is the checks crds_fetch ran on the rendered bundle: it has CRDs,
