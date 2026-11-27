@@ -24,8 +24,12 @@ type Result struct {
 	Unchanged   []string  `json:"unchanged"`
 	Failed      []Failure `json:"failed"`
 	Established bool      `json:"established"`
-	// Error is why the run did not finish: a failure (exit 1 or 2) or a declined confirm (exit 3).
-	Error string `json:"error,omitempty"`
+	// AppliedCount and UnchangedCount stay when --summary leaves the name lists out.
+	AppliedCount   int `json:"appliedCount"`
+	UnchangedCount int `json:"unchangedCount"`
+	// Error is why the run did not finish: a failure (exit 1 or 2) or a declined confirm (exit 3);
+	// always present, "" when it finished (as in the upgrade results).
+	Error string `json:"error"`
 }
 
 // NewResult is an empty result for a run that stopped before it looked at any CRD.
@@ -49,7 +53,14 @@ func (r *Result) WriteText(w io.Writer) {
 }
 
 // WriteJSON prints the result as one JSON object.
-func (r *Result) WriteJSON(w io.Writer) error { return writeJSON(w, r) }
+// With summary the name lists are left out (counts and failures stay): 87 names are noise to a script.
+func (r *Result) WriteJSON(w io.Writer, summary bool) error {
+	r.AppliedCount, r.UnchangedCount = len(r.Applied), len(r.Unchanged)
+	if summary {
+		r.Applied, r.Unchanged = []string{}, []string{}
+	}
+	return writeJSON(w, r)
+}
 
 func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
@@ -111,8 +122,9 @@ type CheckReport struct {
 	NotOwned       []string `json:"notOwned"`
 	NotOnCluster   int      `json:"notOnCluster"`
 	Reasons        []string `json:"reasons"`
-	// Error is set instead of the findings when the check itself failed (exit 2).
-	Error string `json:"error,omitempty"`
+	// Error is set instead of the findings when the check itself failed (exit 2); always present,
+	// "" when the check ran.
+	Error string `json:"error"`
 }
 
 // NewCheckReport is an empty report: every list is [] so a script can iterate it.
@@ -127,7 +139,11 @@ func newCheckReport(version string, total int) *CheckReport {
 
 // WriteJSON prints the report as one JSON object.
 // Lists that were never set print as [], not null.
-func (r *CheckReport) WriteJSON(w io.Writer) error {
+// With summary the list of differing CRDs is left out (total, new and changed say how many).
+func (r *CheckReport) WriteJSON(w io.Writer, summary bool) error {
+	if summary {
+		r.Differs = []string{}
+	}
 	for _, l := range []*[]string{&r.Differs, &r.Terminating, &r.NotEstablished, &r.NotOwned, &r.Reasons} {
 		*l = nonNil(*l)
 	}

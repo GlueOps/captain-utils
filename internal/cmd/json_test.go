@@ -201,6 +201,28 @@ func TestCRDsApplyJSONVerifyFailureKeepsWhatWasApplied(t *testing.T) {
 	}
 }
 
+// -o json on crds always has "error" (empty on success, as in the upgrade results), and --summary
+// leaves the name lists out but keeps the counts.
+func TestCRDsJSONErrorKeyAndSummary(t *testing.T) {
+	dir := fullCaptain(t)
+	_, out, _, _ := runCLI(t, dir, nil, false, "crds", "check", "--version", "v0.1.6", "-o", "json", "--summary")
+	if !strings.Contains(out, `"error": ""`) || !strings.Contains(out, `"differs": []`) || !strings.Contains(out, `"new": 1`) {
+		t.Fatalf("check: %s", out)
+	}
+	_, out, _, _ = runCLI(t, dir, nil, false, "crds", "apply", "--version", "v0.1.6", "--yes", "-o", "json")
+	// the fake cluster keeps nothing, so this run ends in an error: the key is there either way
+	if !strings.Contains(out, `"error": "`) || !strings.Contains(out, `"appliedCount": 1`) {
+		t.Fatalf("apply: %s", out)
+	}
+	_, out, _, _ = runCLI(t, dir, nil, false, "crds", "apply", "--version", "v0.1.6", "--yes", "-o", "json", "--summary")
+	if strings.Contains(out, "x.io") || !strings.Contains(out, `"appliedCount": 1`) {
+		t.Fatalf("apply --summary: %s", out)
+	}
+	if code, out, _, _ := runCLI(t, dir, nil, false, "crds", "check", "--version", "v0.1.6", "--summary"); code != ExitUsage || out != "" {
+		t.Fatalf("--summary without -o json: exit %d %q", code, out)
+	}
+}
+
 // An early failure still carries every documented key (version, diff, status ...), never fewer.
 func TestUpgradeJSONAlwaysHasEveryKey(t *testing.T) {
 	_, _, out, _ := runResult(t, fullCaptain(t), nil, false, "argocd", "upgrade", "--version", "9.3.7")

@@ -90,6 +90,7 @@ orphans the custom resources of a terminating CRD.`,
 	var o crds.Options
 	var requireOwned bool
 	var checkOutput, output string
+	var summary bool
 	add := func(cmd *cobra.Command) *cobra.Command {
 		cmd.Flags().StringVar(&o.Version, "version", "", "bundle release tag vX.Y.Z (required without a terminal; at a terminal apply offers the pin in a chooser, check uses it)")
 		cmd.Flags().StringVar(&o.ChartDir, "chart-dir", "", "a local platform-crds checkout rendered by hack/render.sh (custom)")
@@ -103,6 +104,9 @@ orphans the custom resources of a terminating CRD.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := checkFormat(checkOutput); err != nil {
 				return err
+			}
+			if summary && checkOutput != "json" {
+				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--summary only applies to -o json")}
 			}
 			d, err := a.crdsDeps()
 			if err == nil && checkOutput == "json" {
@@ -121,7 +125,7 @@ orphans the custom resources of a terminating CRD.`,
 						rep.Error = err.Error()
 					}
 				}
-				if jerr := rep.WriteJSON(a.Out); jerr != nil && err == nil {
+				if jerr := rep.WriteJSON(a.Out, summary); jerr != nil && err == nil {
 					err = jerr
 				}
 			}
@@ -149,6 +153,9 @@ A declined confirm exits 3; a partial failure exits 1 with the failed CRDs in th
 			if err := checkFormat(output); err != nil {
 				return err
 			}
+			if summary && output != "json" {
+				return &ExitError{Code: ExitUsage, Err: fmt.Errorf("--summary only applies to -o json")}
+			}
 			d, err := a.crdsDeps()
 			var res *crds.Result
 			if err == nil {
@@ -167,7 +174,7 @@ A declined confirm exits 3; a partial failure exits 1 with the failed CRDs in th
 					if err != nil {
 						res.Error = err.Error()
 					}
-					if jerr := res.WriteJSON(a.Out); jerr != nil && err == nil {
+					if jerr := res.WriteJSON(a.Out, summary); jerr != nil && err == nil {
 						err = jerr
 					}
 				}
@@ -179,6 +186,9 @@ A declined confirm exits 3; a partial failure exits 1 with the failed CRDs in th
 	})
 	applyCmd.Flags().StringVarP(&output, "output", "o", "text", "result format: text or json")
 	checkCmd.Flags().StringVarP(&checkOutput, "output", "o", "text", "result format: text or json ({version, inSync, total, new, changed, differs, terminating, notEstablished, notOwned, notOnCluster, reasons}; stdout is only the JSON)")
+	for _, cmd := range []*cobra.Command{checkCmd, applyCmd} {
+		cmd.Flags().BoolVar(&summary, "summary", false, "with -o json: leave the CRD name lists out (counts, failures and error stay)")
+	}
 	c.AddCommand(add(checkCmd), applyCmd)
 	return c
 }

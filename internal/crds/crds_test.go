@@ -884,7 +884,7 @@ func TestPartialApplyFailureNamesTheFailedCRD(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 	var buf bytes.Buffer
-	if err := res.WriteJSON(&buf); err != nil || !strings.Contains(buf.String(), `"failed": [`) || !strings.Contains(buf.String(), `"name": "b.x.io"`) {
+	if err := res.WriteJSON(&buf, false); err != nil || !strings.Contains(buf.String(), `"failed": [`) || !strings.Contains(buf.String(), `"name": "b.x.io"`) {
 		t.Fatalf("%v %s", err, buf.String())
 	}
 }

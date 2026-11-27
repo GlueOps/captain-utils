@@ -96,7 +96,9 @@ CRD, or with `-o json`: `{"version", "applied": [...], "unchanged": [...], "fail
 "established": true|false, "error"}`. `applied` are CRDs applied with a content change, `unchanged` ones with none,
 `established` is true once the post-apply wait saw every bundle CRD Established. A declined or in-sync run
 applies nothing; `error` is set whenever the run did not finish (a failure, a usage error, a declined confirm), and
-`applied` still lists what was applied when only the post-apply check failed. The menu treats 3 as skipped, not as a failure.
+`applied` still lists what was applied when only the post-apply check failed. `error` is always there (`""` when
+the run finished), and `appliedCount` / `unchangedCount` count the lists; `--summary` (with `-o json`, exit 2 otherwise)
+leaves the CRD name lists out and keeps the counts and `failed`. The menu treats 3 as skipped, not as a failure.
 
 `-o json` is also on `crds check`, `platform diff|upgrade`, `argocd diff|upgrade` and `aws calico upgrade`.
 Stdout is then one JSON object and nothing else (the plan, status and helm text go to stderr); exit
@@ -107,7 +109,7 @@ rejects before the command runs prints `{"error": "..."}` when `-o json` is on t
 Lists are always `[]`, never `null`.
 
 - `crds check`: `{"version", "inSync", "total", "new", "changed", "differs": [...], "terminating": [...],
-  "notEstablished": [...], "notOwned": [...], "notOnCluster", "reasons": [...], "error"}`. `inSync` is true
+  "notEstablished": [...], "notOwned": [...], "notOnCluster", "reasons": [...], "error"}` (`error` is `""` when the check ran; `--summary` leaves `differs` out). `inSync` is true
   exactly when the exit code is 0. When the check itself failed, `error` is set and the lists are empty.
 - upgrades: `{"release", "namespace", "chart", "version", "action", "changed", "diff", "diffLines", "status",
   "revision", "notes", "warnings", "error"}`; every key is always there (`changed` is `null` when the run stopped before the diff,
