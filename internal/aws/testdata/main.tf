@@ -1,6 +1,6 @@
 module "captain" {
   iam_role_to_assume = "arn:aws:iam::000000000000:role/glueops-captain-role"
-  source             = "git::https://github.com/GlueOps/terraform-module-cloud-aws-kubernetes-cluster.git?ref=v0.50.0"
+  source             = "git::https://github.com/GlueOps/terraform-module-cloud-aws-kubernetes-cluster.git?ref=v0.53.0"
   eks_version        = "1.33"
   csi_driver_version = "v1.45.0-eksbuild.2"
   coredns_version    = "v1.11.4-eksbuild.14"
